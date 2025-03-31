@@ -1,7 +1,6 @@
 const { Client, GatewayIntentBits, Partials, ChannelType } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
-const { createWriteStream } = require('fs');
 require('dotenv').config();
 
 // Create a new client instance
@@ -16,18 +15,24 @@ const client = new Client({
 
 // Set up command prefix
 const PREFIX = '!';
-// Number of channels to process in parallel
-const PARALLEL_CHANNELS = 5;
-// Directory to store exports
-const EXPORT_DIR = './discord_exports';
+// Number of channels to process in parallel - reduced for stability
+const PARALLEL_CHANNELS = 3;
+// Directory to store exports - now set to root folder
+const EXPORT_DIR = './';
+
+// Track total messages processed and start time
+let totalMessagesProcessed = 0;
+let lastStatusUpdateCount = 0;
+let exportStartTime;
+
+// Track rate limit hits to adjust backoff
+let rateLimitHits = 0;
+
+// Single guild export object that will contain everything
+let fullGuildExport = {};
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
-  
-  // Create export directory if it doesn't exist
-  if (!fs.existsSync(EXPORT_DIR)) {
-    fs.mkdirSync(EXPORT_DIR, { recursive: true });
-  }
 });
 
 client.on('messageCreate', async (message) => {
@@ -48,6 +53,21 @@ client.on('messageCreate', async (message) => {
         return message.reply('Guild not found. Please specify a valid guild ID.');
       }
       
+      // Reset counters and set start time
+      totalMessagesProcessed = 0;
+      lastStatusUpdateCount = 0;
+      rateLimitHits = 0;
+      exportStartTime = new Date();
+      
+      // Initialize the full guild export object
+      fullGuildExport = {
+        id: guild.id,
+        name: guild.name,
+        exportStartedAt: new Date().toISOString(),
+        timestamp: Date.now(),
+        channels: []
+      };
+      
       await exportGuildMessages(guild, message);
     } catch (error) {
       console.error('Error during export:', error);
@@ -56,16 +76,24 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Helper function to handle rate limits
-async function fetchWithRateLimit(func) {
+// Enhanced rate limit handler with progressive backoff
+async function fetchWithRateLimit(func, retryCount = 0) {
   try {
     return await func();
   } catch (error) {
     if (error.code === 429) { // Rate limit error code
-      const retryAfter = error.retry_after || 5000;
-      console.log(`Rate limited! Waiting ${retryAfter}ms before retrying...`);
+      rateLimitHits++;
+      const baseDelay = error.retry_after || 1000;
+      
+      // Apply progressive backoff based on multiple factors
+      const messageBackoffFactor = 1 + Math.floor(totalMessagesProcessed / 10000) * 0.2;
+      const rateLimitFactor = 1 + Math.min(rateLimitHits / 10, 2);
+      const retryFactor = 1 + Math.min(retryCount * 0.5, 3);
+      const retryAfter = baseDelay * messageBackoffFactor * rateLimitFactor * retryFactor;
+      
+      console.log(`Rate limited! Waiting ${Math.round(retryAfter)}ms before retrying... (Attempt ${retryCount + 1}, Total rate limits: ${rateLimitHits})`);
       await new Promise(resolve => setTimeout(resolve, retryAfter));
-      return fetchWithRateLimit(func); // Retry after waiting
+      return fetchWithRateLimit(func, retryCount + 1); // Retry with increased count
     }
     throw error; // Re-throw if it's not a rate limit error
   }
@@ -84,9 +112,58 @@ function cleanObject(obj) {
   return result;
 }
 
-async function fetchMessagesFromChannel(channel) {
+// Calculate time elapsed in a human-readable format
+function getTimeElapsed() {
+  const now = new Date();
+  const elapsed = now - exportStartTime;
+  
+  const seconds = Math.floor(elapsed / 1000) % 60;
+  const minutes = Math.floor(elapsed / (1000 * 60)) % 60;
+  const hours = Math.floor(elapsed / (1000 * 60 * 60));
+  
+  return `${hours}h ${minutes}m ${seconds}s`;
+}
+
+// Calculate processing speed
+function getProcessingSpeed() {
+  const now = new Date();
+  const elapsedSeconds = (now - exportStartTime) / 1000;
+  if (elapsedSeconds === 0) return "0";
+  
+  const messagesPerSecond = totalMessagesProcessed / elapsedSeconds;
+  return messagesPerSecond.toFixed(2);
+}
+
+// Send status update if we've processed enough new messages
+async function checkAndSendStatusUpdate(channel, guild) {
+  if (totalMessagesProcessed - lastStatusUpdateCount >= 1000) {
+    const timeElapsed = getTimeElapsed();
+    const speed = getProcessingSpeed();
+    
+    await channel.send(
+      `Status update: Processed ${totalMessagesProcessed.toLocaleString()} messages from ${guild.name}\n` +
+      `Time elapsed: ${timeElapsed}\n` +
+      `Processing speed: ${speed} messages/second\n` +
+      `Rate limit hits: ${rateLimitHits}`
+    );
+    
+    lastStatusUpdateCount = totalMessagesProcessed;
+    
+    // Try to trigger garbage collection if available
+    if (global.gc) {
+      try {
+        global.gc();
+      } catch (e) {
+        // Continue if gc is not available
+      }
+    }
+  }
+}
+
+async function fetchMessagesFromChannel(channel, originalChannel, guild) {
   const messages = [];
   let lastMessageId = null;
+  let batchCount = 0;
   
   // Loop to handle pagination
   while (true) {
@@ -107,6 +184,7 @@ async function fetchMessagesFromChannel(channel) {
       break;
     }
     
+    batchCount++;
     fetchedMessages.forEach(msg => {
       // Extract all relevant metadata with cleaned objects
       messages.push(cleanObject({
@@ -175,7 +253,13 @@ async function fetchMessagesFromChannel(channel) {
       }));
     });
     
-    console.log(`Channel ${channel.name}: Fetched ${messages.length} messages so far...`);
+    // Update the total message count
+    totalMessagesProcessed += fetchedMessages.size;
+    
+    // Check if we should send a status update
+    await checkAndSendStatusUpdate(originalChannel, guild);
+    
+    console.log(`Channel ${channel.name}: Fetched ${messages.length} messages so far... (Total: ${totalMessagesProcessed})`);
     
     // Update lastMessageId for pagination
     lastMessageId = fetchedMessages.last().id;
@@ -184,39 +268,21 @@ async function fetchMessagesFromChannel(channel) {
     if (fetchedMessages.size < 100) {
       break;
     }
+    
+    // Add a small delay between batches to avoid rate limiting
+    // The delay increases as we process more batches from the same channel
+    if (batchCount > 5) {
+      const delay = Math.min(200 + batchCount * 20, 1000);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
   
   return messages;
 }
 
-// Stream-based approach to save messages to file
-function saveMessagesToFile(messages, filePath) {
-  return new Promise((resolve, reject) => {
-    const stream = createWriteStream(filePath);
-    
-    stream.write('[\n');
-    
-    messages.forEach((message, index) => {
-      const content = JSON.stringify(message, null, 2);
-      stream.write(content + (index < messages.length - 1 ? ',\n' : '\n'));
-    });
-    
-    stream.write(']\n');
-    
-    stream.on('finish', () => {
-      resolve();
-    });
-    
-    stream.on('error', (err) => {
-      reject(err);
-    });
-    
-    stream.end();
-  });
-}
-
-async function processThreads(channel, channelData) {
-  // Get all active threads
+// Process threads from a channel
+async function processThreads(channel, channelData, originalChannel, guild) {
+  // Get all active threads with backoff retry
   let activeThreads;
   try {
     activeThreads = await fetchWithRateLimit(() => channel.threads.fetchActive());
@@ -226,46 +292,71 @@ async function processThreads(channel, channelData) {
   }
   
   const threadDataList = [];
+  let processedCount = 0;
   
-  // Process active threads
-  const activeThreadPromises = Array.from(activeThreads.threads.values()).map(async (thread) => {
-    try {
-      const messages = await fetchMessagesFromChannel(thread);
-      
-      if (messages.length > 0) {
-        // Sort messages chronologically
-        messages.sort((a, b) => a.timestamp - b.timestamp);
+  // Process active threads in smaller batches to avoid memory pressure
+  const activeThreadsArray = Array.from(activeThreads.threads.values());
+  const batchSize = 3; // Smaller batch size for more stable processing
+  
+  for (let i = 0; i < activeThreadsArray.length; i += batchSize) {
+    const threadBatch = activeThreadsArray.slice(i, i + batchSize);
+    const batchPromises = threadBatch.map(async (thread) => {
+      try {
+        const messages = await fetchMessagesFromChannel(thread, originalChannel, guild);
         
-        // Save thread messages to separate file
-        const threadFileName = path.join(EXPORT_DIR, `thread_${thread.id}_export.json`);
-        await saveMessagesToFile(messages, threadFileName);
-        
-        return cleanObject({
-          id: thread.id,
-          name: thread.name,
-          ownerId: thread.ownerId,
-          parentId: thread.parentId,
-          messagesCount: messages.length,
-          firstMessageTimestamp: messages.length > 0 ? messages[0].timestamp : null,
-          messagesFile: threadFileName
-        });
+        if (messages.length > 0) {
+          // Sort messages chronologically
+          messages.sort((a, b) => a.timestamp - b.timestamp);
+          
+          processedCount++;
+          if (processedCount % 5 === 0) {
+            // Provide interim updates for thread processing
+            const timeElapsed = getTimeElapsed();
+            console.log(`Processed ${processedCount} threads in channel ${channel.name} (${timeElapsed})`);
+          }
+          
+          return cleanObject({
+            id: thread.id,
+            name: thread.name,
+            ownerId: thread.ownerId,
+            parentId: thread.parentId,
+            messagesCount: messages.length,
+            firstMessageTimestamp: messages.length > 0 ? messages[0].timestamp : null,
+            messages: messages // Include the messages directly in the thread object
+          });
+        }
+      } catch (threadError) {
+        console.error(`Error processing thread ${thread.name}:`, threadError);
       }
-    } catch (threadError) {
-      console.error(`Error processing thread ${thread.name}:`, threadError);
+      return null;
+    });
+    
+    // Wait for each batch to complete before starting the next
+    const batchResults = await Promise.all(batchPromises);
+    threadDataList.push(...batchResults.filter(Boolean));
+    
+    // Force garbage collection if available (requires --expose-gc flag)
+    if (global.gc && i % 3 === 0) {
+      try {
+        global.gc();
+      } catch (e) {
+        // Continue if gc is not available
+      }
     }
-    return null;
-  });
+    
+    // Brief pause between batches to allow API recovery
+    if (i + batchSize < activeThreadsArray.length) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
   
-  const activeThreadResults = await Promise.all(activeThreadPromises);
-  threadDataList.push(...activeThreadResults.filter(Boolean));
-  
-  // Get archived threads
+  // Process archived threads with similar optimizations
   let lastThreadId = null;
   let hasMoreArchivedThreads = true;
   
   while (hasMoreArchivedThreads) {
     try {
-      const options = { limit: 100 };
+      const options = { limit: 50 }; // Reduced from 100 to avoid rate limits
       if (lastThreadId) {
         options.before = lastThreadId;
       }
@@ -277,37 +368,51 @@ async function processThreads(channel, channelData) {
         break;
       }
       
-      const archivedThreadPromises = Array.from(archivedThreads.threads.values()).map(async (thread) => {
-        try {
-          const messages = await fetchMessagesFromChannel(thread);
-          
-          if (messages.length > 0) {
-            // Sort messages chronologically
-            messages.sort((a, b) => a.timestamp - b.timestamp);
-            
-            // Save thread messages to separate file
-            const threadFileName = path.join(EXPORT_DIR, `thread_${thread.id}_export.json`);
-            await saveMessagesToFile(messages, threadFileName);
-            
-            return cleanObject({
-              id: thread.id,
-              name: thread.name,
-              ownerId: thread.ownerId,
-              parentId: thread.parentId,
-              archived: true,
-              messagesCount: messages.length,
-              firstMessageTimestamp: messages.length > 0 ? messages[0].timestamp : null,
-              messagesFile: threadFileName
-            });
-          }
-        } catch (threadError) {
-          console.error(`Error processing archived thread ${thread.name}:`, threadError);
-        }
-        return null;
-      });
+      // Process archived threads in smaller batches too
+      const archivedThreadsArray = Array.from(archivedThreads.threads.values());
       
-      const archivedThreadResults = await Promise.all(archivedThreadPromises);
-      threadDataList.push(...archivedThreadResults.filter(Boolean));
+      for (let i = 0; i < archivedThreadsArray.length; i += batchSize) {
+        const threadBatch = archivedThreadsArray.slice(i, i + batchSize);
+        const batchPromises = threadBatch.map(async (thread) => {
+          try {
+            const messages = await fetchMessagesFromChannel(thread, originalChannel, guild);
+            
+            if (messages.length > 0) {
+              // Sort messages chronologically
+              messages.sort((a, b) => a.timestamp - b.timestamp);
+              
+              processedCount++;
+              if (processedCount % 5 === 0) {
+                // Provide interim updates for thread processing
+                const timeElapsed = getTimeElapsed();
+                console.log(`Processed ${processedCount} threads in channel ${channel.name} (${timeElapsed})`);
+              }
+              
+              return cleanObject({
+                id: thread.id,
+                name: thread.name,
+                ownerId: thread.ownerId,
+                parentId: thread.parentId,
+                archived: true,
+                messagesCount: messages.length,
+                firstMessageTimestamp: messages.length > 0 ? messages[0].timestamp : null,
+                messages: messages // Include the messages directly in the thread object
+              });
+            }
+          } catch (threadError) {
+            console.error(`Error processing archived thread ${thread.name}:`, threadError);
+          }
+          return null;
+        });
+        
+        const batchResults = await Promise.all(batchPromises);
+        threadDataList.push(...batchResults.filter(Boolean));
+        
+        // Allow brief recovery period
+        if (i + batchSize < archivedThreadsArray.length) {
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+      }
       
       // Update for pagination
       if (archivedThreads.threads.size > 0) {
@@ -316,6 +421,9 @@ async function processThreads(channel, channelData) {
       } else {
         hasMoreArchivedThreads = false;
       }
+      
+      // Add a pause between archived thread fetches to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
       
     } catch (archiveError) {
       console.error(`Error fetching archived threads:`, archiveError);
@@ -333,7 +441,7 @@ async function processThreads(channel, channelData) {
   return threadDataList;
 }
 
-async function processChannel(channel, guildId) {
+async function processChannel(channel, guildId, originalChannel, guild) {
   try {
     console.log(`Processing channel: ${channel.name} (${channel.id})`);
     
@@ -346,60 +454,43 @@ async function processChannel(channel, guildId) {
     // If it's a forum channel
     if (channel.type === ChannelType.GuildForum) {
       // Get forum messages (usually just metadata)
-      const messages = await fetchMessagesFromChannel(channel);
+      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild);
       
       if (messages.length > 0) {
         // Sort messages chronologically
         messages.sort((a, b) => a.timestamp - b.timestamp);
-        
-        // Save forum messages to file
-        const messagesFileName = path.join(EXPORT_DIR, `channel_${channel.id}_messages_export.json`);
-        await saveMessagesToFile(messages, messagesFileName);
-        
         channelData.messagesCount = messages.length;
-        channelData.messagesFile = messagesFileName;
+        channelData.messages = messages; // Store messages directly in the channel object
       }
       
       // Get all threads in the forum
-      const threads = await processThreads(channel, channelData);
+      const threads = await processThreads(channel, channelData, originalChannel, guild);
       
       if (threads.length > 0) {
-        // Save threads data to file
-        const threadsFileName = path.join(EXPORT_DIR, `channel_${channel.id}_threads_export.json`);
-        await saveMessagesToFile(threads, threadsFileName);
-        
         channelData.threadsCount = threads.length;
-        channelData.threadsFile = threadsFileName;
+        channelData.threads = threads; // Store threads directly in the channel object
       }
     } 
     // If it's a regular text channel
     else if (channel.type === ChannelType.GuildText) {
       // Get messages from the channel
-      const messages = await fetchMessagesFromChannel(channel);
+      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild);
       
       if (messages.length > 0) {
         // Sort messages chronologically
         messages.sort((a, b) => a.timestamp - b.timestamp);
         
-        // Save channel messages to file
-        const messagesFileName = path.join(EXPORT_DIR, `channel_${channel.id}_messages_export.json`);
-        await saveMessagesToFile(messages, messagesFileName);
-        
         channelData.messagesCount = messages.length;
         channelData.firstMessageTimestamp = messages.length > 0 ? messages[0].timestamp : null;
-        channelData.messagesFile = messagesFileName;
+        channelData.messages = messages; // Store messages directly in the channel object
       }
       
       // Get all threads in the text channel
-      const threads = await processThreads(channel, channelData);
+      const threads = await processThreads(channel, channelData, originalChannel, guild);
       
       if (threads.length > 0) {
-        // Save threads data to file
-        const threadsFileName = path.join(EXPORT_DIR, `channel_${channel.id}_threads_export.json`);
-        await saveMessagesToFile(threads, threadsFileName);
-        
         channelData.threadsCount = threads.length;
-        channelData.threadsFile = threadsFileName;
+        channelData.threads = threads; // Store threads directly in the channel object
       }
     }
     // If it's already a thread
@@ -408,27 +499,19 @@ async function processChannel(channel, guildId) {
       channel.type === ChannelType.PrivateThread || 
       channel.type === ChannelType.AnnouncementThread
     ) {
-      const messages = await fetchMessagesFromChannel(channel);
+      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild);
       
       if (messages.length > 0) {
         // Sort messages chronologically
         messages.sort((a, b) => a.timestamp - b.timestamp);
         
-        // Save thread messages to file
-        const messagesFileName = path.join(EXPORT_DIR, `thread_${channel.id}_messages_export.json`);
-        await saveMessagesToFile(messages, messagesFileName);
-        
         channelData.messagesCount = messages.length;
         channelData.firstMessageTimestamp = messages.length > 0 ? messages[0].timestamp : null;
-        channelData.messagesFile = messagesFileName;
+        channelData.messages = messages; // Store messages directly in the channel object
         channelData.parentId = channel.parentId;
         channelData.ownerId = channel.ownerId;
       }
     }
-    
-    // Save individual channel metadata
-    const channelMetaFile = path.join(EXPORT_DIR, `channel_${channel.id}_meta.json`);
-    fs.writeFileSync(channelMetaFile, JSON.stringify(channelData, null, 2));
     
     return channelData;
   } catch (error) {
@@ -437,89 +520,282 @@ async function processChannel(channel, guildId) {
   }
 }
 
+// Save the full guild export to a single file
+function saveFullGuildExport(guildExport, filename) {
+  return new Promise((resolve, reject) => {
+    try {
+      fs.writeFileSync(filename, JSON.stringify(guildExport, null, 2));
+      resolve();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 async function exportGuildMessages(guild, originalMessage) {
-  // Create guild-specific directory
-  const guildDir = path.join(EXPORT_DIR, `guild_${guild.id}`);
-  if (!fs.existsSync(guildDir)) {
-    fs.mkdirSync(guildDir, { recursive: true });
+  // Create export directory if needed
+  if (!fs.existsSync(EXPORT_DIR)) {
+    fs.mkdirSync(EXPORT_DIR, { recursive: true });
   }
-  
-  // Initialize guild data
-  const guildData = {
-    id: guild.id,
-    name: guild.name,
-    exportStartedAt: new Date().toISOString(),
-    channels: []
-  };
   
   // Check for processed channels from previous runs
-  const processedChannelIdsFile = path.join(guildDir, 'processed_channel_ids.json');
   const processedChannelIds = new Set();
   
-  if (fs.existsSync(processedChannelIdsFile)) {
-    const processed = JSON.parse(fs.readFileSync(processedChannelIdsFile));
-    processed.forEach(id => processedChannelIds.add(id));
-    console.log(`Resuming export. ${processedChannelIds.size} channels already processed.`);
-    originalMessage.channel.send(`Resuming previous export. ${processedChannelIds.size} channels already processed.`);
-  }
-  
-  // Get all channels we want to export from
+  // Get all channels we want to export, filtered by type
   const channels = Array.from(guild.channels.cache.filter(channel => 
     (channel.type === ChannelType.GuildText || 
      channel.type === ChannelType.GuildForum || 
      channel.type === ChannelType.PublicThread || 
      channel.type === ChannelType.PrivateThread || 
      channel.type === ChannelType.AnnouncementThread) &&
-    !processedChannelIds.has(channel.id)
+    channel.viewable
   ).values());
   
-  originalMessage.channel.send(`Found ${channels.length} channels to process (including text channels, forums, and threads).`);
+  // Initialize guild data for a single complete export
+  const timestamp = Date.now();
+  const guildData = {
+    id: guild.id,
+    name: guild.name,
+    exportStartedAt: new Date().toISOString(),
+    timestamp: timestamp,
+    totalChannelsToProcess: channels.length,
+    channels: []
+  };
   
-  // Process channels in parallel batches
-  for (let i = 0; i < channels.length; i += PARALLEL_CHANNELS) {
-    const channelBatch = channels.slice(i, i + PARALLEL_CHANNELS);
+  // Reset counters and set start time
+  totalMessagesProcessed = 0;
+  lastStatusUpdateCount = 0;
+  rateLimitHits = 0;
+  exportStartTime = new Date();
+  
+  // Sort channels by type and name
+  channels.sort((a, b) => {
+    if (a.type !== b.type) return a.type - b.type;
+    return a.name.localeCompare(b.name);
+  });
+  
+  await originalMessage.channel.send(`Found ${channels.length} channels to process (including text channels, forums, and threads).`);
+  
+  // Process channels one by one to avoid memory issues
+  for (let i = 0; i < channels.length; i++) {
+    const channel = channels[i];
     
-    originalMessage.channel.send(`Processing batch ${Math.floor(i/PARALLEL_CHANNELS) + 1}: Channels ${i+1} to ${Math.min(i+PARALLEL_CHANNELS, channels.length)} of ${channels.length}`);
+    await originalMessage.channel.send(
+      `Processing channel ${i+1}/${channels.length}: ${channel.name}\n` +
+      `Time elapsed: ${getTimeElapsed()}\n` +
+      `Messages processed: ${totalMessagesProcessed.toLocaleString()}`
+    );
     
-    // Process this batch of channels in parallel
-    const batchResults = await Promise.all(channelBatch.map(async (channel) => {
-      return processChannel(channel, guild.id);
-    }));
+    // Process this channel
+    const channelData = await processChannel(channel, guild.id, originalMessage.channel, guild);
     
-    // Filter out nulls (failed channels) and add to guild data
-    const successfulChannels = batchResults.filter(Boolean);
-    guildData.channels.push(...successfulChannels);
-    
-    // Mark these channels as processed
-    channelBatch.forEach(channel => {
+    if (channelData) {
+      guildData.channels.push(channelData);
       processedChannelIds.add(channel.id);
-    });
+    }
     
-    // Update the processed channels file
-    fs.writeFileSync(processedChannelIdsFile, JSON.stringify(Array.from(processedChannelIds)));
+    // Send a status update every 3 channels
+    if ((i + 1) % 3 === 0 || i === channels.length - 1) {
+      await originalMessage.channel.send(
+        `Progress: ${processedChannelIds.size}/${channels.length} channels processed\n` +
+        `Total messages: ${totalMessagesProcessed.toLocaleString()}\n` +
+        `Processing speed: ${getProcessingSpeed()} messages/second\n` +
+        `Rate limit hits: ${rateLimitHits}`
+      );
+    }
     
-    // Save guild progress after each batch
-    const guildDataFile = path.join(guildDir, `guild_${guild.id}_export_progress.json`);
-    fs.writeFileSync(guildDataFile, JSON.stringify(guildData, null, 2));
+    // Add a small delay between channels
+    if (i < channels.length - 1) {
+      const delay = Math.min(1000 + rateLimitHits * 200, 5000);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
     
-    originalMessage.channel.send(`Progress: ${processedChannelIds.size}/${processedChannelIds.size + channels.length - (i + channelBatch.length)} channels processed`);
+    // Try to trigger garbage collection if available
+    if (global.gc) {
+      try { global.gc(); } catch (e) { /* Continue */ }
+    }
   }
   
-  // Sort channels chronologically
+  // Sort channels by their first message timestamp
   guildData.channels.sort((a, b) => {
     if (!a.firstMessageTimestamp) return 1;
     if (!b.firstMessageTimestamp) return -1;
     return a.firstMessageTimestamp - b.firstMessageTimestamp;
   });
   
+  // Complete the export data
   guildData.exportCompletedAt = new Date().toISOString();
+  guildData.totalMessagesExported = totalMessagesProcessed;
+  guildData.totalChannelsExported = guildData.channels.length;
+  guildData.exportDurationMs = new Date() - exportStartTime;
   
-  // Write final result to file
-  const finalFileName = path.join(guildDir, `guild_${guild.id}_export_${Date.now()}.json`);
-  fs.writeFileSync(finalFileName, JSON.stringify(guildData, null, 2));
+  // Create a single JSON file for the entire guild
+  const finalFileName = path.join(EXPORT_DIR, `${guild.name.replace(/[^a-z0-9]/gi, '_')}_${guild.id}_complete_export.json`);
   
-  originalMessage.reply(`Export complete! Exported data from ${guildData.channels.length} channels (including threads and forums) to ${finalFileName}`);
+  try {
+    await originalMessage.channel.send(`Creating single JSON export file...`);
+    
+    // Write the entire JSON in one operation
+    fs.writeFileSync(finalFileName, JSON.stringify(guildData, null, 2));
+    
+    await originalMessage.reply(
+      `Export complete!\n` +
+      `✅ Exported ${totalMessagesProcessed.toLocaleString()} messages from ${guildData.channels.length} channels\n` +
+      `⏱️ Total time: ${getTimeElapsed()}\n` +
+      `📁 All data saved to: ${finalFileName}`
+    );
+  } catch (error) {
+    console.error('Error writing final export file:', error);
+    
+    // If writing fails due to size, use streaming approach
+    await originalMessage.channel.send(`Trying alternative streaming approach for large export...`);
+    
+    await writeGuildDataToStreamingJson(guildData, finalFileName);
+    
+    await originalMessage.reply(
+      `Export complete!\n` +
+      `✅ Exported ${totalMessagesProcessed.toLocaleString()} messages from ${guildData.channels.length} channels\n` +
+      `⏱️ Total time: ${getTimeElapsed()}\n` +
+      `📁 All data saved to: ${finalFileName}`
+    );
+  }
 }
 
-// Login to Discord
-client.login(process.env.DISCORD_TOKEN);
+// Helper function to write large JSON data using streaming
+async function writeGuildDataToStreamingJson(guildData, filePath) {
+  return new Promise((resolve, reject) => {
+    try {
+      const stream = fs.createWriteStream(filePath);
+      
+      // Write opening brace and basic guild info
+      stream.write('{\n');
+      stream.write(`  "id": ${JSON.stringify(guildData.id)},\n`);
+      stream.write(`  "name": ${JSON.stringify(guildData.name)},\n`);
+      stream.write(`  "exportStartedAt": ${JSON.stringify(guildData.exportStartedAt)},\n`);
+      stream.write(`  "exportCompletedAt": ${JSON.stringify(guildData.exportCompletedAt)},\n`);
+      stream.write(`  "timestamp": ${guildData.timestamp},\n`);
+      stream.write(`  "totalMessagesExported": ${guildData.totalMessagesExported},\n`);
+      stream.write(`  "totalChannelsExported": ${guildData.totalChannelsExported},\n`);
+      stream.write(`  "exportDurationMs": ${guildData.exportDurationMs},\n`);
+      
+      // Begin channels array
+      stream.write('  "channels": [\n');
+      
+      // Write each channel
+      const channelCount = guildData.channels.length;
+      for (let i = 0; i < channelCount; i++) {
+        const channelJson = JSON.stringify(guildData.channels[i], null, 2);
+        
+        // Add proper indentation and commas
+        const formattedChannel = channelJson
+          .split('\n')
+          .map(line => '    ' + line)
+          .join('\n');
+          
+        stream.write(formattedChannel + (i < channelCount - 1 ? ',\n' : '\n'));
+        
+        // Clear the channel data after writing to help with memory
+        guildData.channels[i] = null;
+      }
+      
+      // Close the channels array and the main object
+      stream.write('  ]\n');
+      stream.write('}\n');
+      
+      stream.on('finish', () => {
+        console.log(`Successfully wrote guild data to ${filePath}`);
+        resolve();
+      });
+      
+      stream.on('error', (err) => {
+        console.error(`Error writing guild data: ${err}`);
+        reject(err);
+      });
+      
+      stream.end();
+      
+    } catch (error) {
+      console.error(`Error in streaming write: ${error}`);
+      reject(error);
+    }
+  });
+}
+
+// Modified processChannel to include messages directly in the channel data
+async function processChannel(channel, guildId, originalChannel, guild) {
+  try {
+    console.log(`Processing channel: ${channel.name} (${channel.id})`);
+    
+    const channelData = cleanObject({
+      id: channel.id,
+      name: channel.name,
+      type: channel.type
+    });
+    
+    // If it's a forum channel
+    if (channel.type === ChannelType.GuildForum) {
+      // Get forum messages (usually just metadata)
+      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild);
+      
+      if (messages.length > 0) {
+        messages.sort((a, b) => a.timestamp - b.timestamp);
+        channelData.messages = messages; // Include messages directly
+        channelData.messagesCount = messages.length;
+      }
+      
+      // Get all threads in the forum and include them directly
+      const threads = await processThreads(channel, channelData, originalChannel, guild);
+      if (threads.length > 0) {
+        channelData.threads = threads; // Include threads directly
+        channelData.threadsCount = threads.length;
+      }
+    } 
+    // If it's a regular text channel
+    else if (channel.type === ChannelType.GuildText) {
+      // Get messages from the channel
+      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild);
+      
+      if (messages.length > 0) {
+        messages.sort((a, b) => a.timestamp - b.timestamp);
+        channelData.messages = messages; // Include messages directly
+        channelData.messagesCount = messages.length;
+        channelData.firstMessageTimestamp = messages.length > 0 ? messages[0].timestamp : null;
+      }
+      
+      // Get all threads in the text channel and include them directly
+      const threads = await processThreads(channel, channelData, originalChannel, guild);
+      if (threads.length > 0) {
+        channelData.threads = threads; // Include threads directly
+        channelData.threadsCount = threads.length;
+      }
+    }
+    // If it's already a thread
+    else if (
+      channel.type === ChannelType.PublicThread || 
+      channel.type === ChannelType.PrivateThread || 
+      channel.type === ChannelType.AnnouncementThread
+    ) {
+      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild);
+      
+      if (messages.length > 0) {
+        messages.sort((a, b) => a.timestamp - b.timestamp);
+        channelData.messages = messages; // Include messages directly
+        channelData.messagesCount = messages.length;
+        channelData.firstMessageTimestamp = messages.length > 0 ? messages[0].timestamp : null;
+        channelData.parentId = channel.parentId;
+        channelData.ownerId = channel.ownerId;
+      }
+    }
+    
+    return channelData;
+  } catch (error) {
+    console.error(`Error processing channel ${channel.name}:`, error);
+    return null;
+  }
+}
+
+// Login to Discord with proper error handling
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+  console.error('Failed to login to Discord:', err);
+  console.log('Please check your DISCORD_TOKEN in the .env file and ensure the bot is properly configured.');
+});
