@@ -197,36 +197,6 @@ async function fetchMessagesFromChannel(channel, originalChannel, guild, channel
       }));
     });
     
-	// Update the total message count
-totalMessagesProcessed += fetchedMessages.size;
-
-// Check if we should do an incremental save
-if (totalMessagesProcessed - lastIncrementalSaveCount >= INCREMENTAL_SAVE_INTERVAL) {
-  // Create temporary guild data with current progress
-  const tempGuildData = {
-    id: guild.id,
-    name: guild.name,
-    exportStartedAt: new Date(exportStartTime).toISOString(),
-    timestamp: Date.now(),
-    channelsProcessedSoFar: guild.channels.cache.filter(c => c.id !== channel.id).size,
-    currentlyProcessing: channel.name,
-    channels: [] // We'll leave this empty for incremental saves to save memory
-  };
-  
-  // Do the incremental save
-  await saveIncrementalData(tempGuildData, guild, originalChannel);
-  
-  // Update the counter for when we last saved
-  lastIncrementalSaveCount = totalMessagesProcessed;
-}
-
-// Check if we should send a status update - use the combined update function
-if (totalMessagesProcessed - lastStatusUpdateCount >= 1000) {
-  // Update the message count in the progress info
-  const progressInfo = `Processing messages: ${messages.length} in current channel (${totalMessagesProcessed.toLocaleString()} total)`;
-  await checkAndSendStatusUpdate(originalChannel, guild, channelStatusInfo, progressInfo);
-}
-	
     // Update the total message count
     totalMessagesProcessed += fetchedMessages.size;
     
@@ -626,6 +596,10 @@ exportStartTime = new Date();
       `⏱️ Total time: ${getTimeElapsed()}\n` +
       `📁 All data saved to: ${finalFileName}`
     );
+		
+// Clean up incremental files now that we have a complete export
+cleanupIncrementalFiles(guild);
+
   } catch (error) {
     console.error('Error writing final export file:', error);
     
@@ -642,6 +616,8 @@ exportStartTime = new Date();
       `⏱️ Total time: ${getTimeElapsed()}\n` +
       `📁 All data saved to: ${finalFileName}`
     );
+	// Clean up incremental files now that we have a complete export
+cleanupIncrementalFiles(guild);
   }
 }
 
@@ -964,6 +940,23 @@ async function processThreads(channel, channelData, originalChannel, guild, chan
   return threadDataList;
 }
 
+// Helper function to clean up incremental files after a successful export
+function cleanupIncrementalFiles(guild) {
+  try {
+    const files = fs.readdirSync(EXPORT_DIR);
+    const incrementalPattern = `${guild.name.replace(/[^a-z0-9]/gi, '_')}_${guild.id}_incremental_`;
+    
+    for (const file of files) {
+      if (file.includes(incrementalPattern)) {
+        fs.unlinkSync(path.join(EXPORT_DIR, file));
+        console.log(`Deleted incremental file: ${file}`);
+      }
+    }
+    console.log('Cleaned up all incremental save files');
+  } catch (error) {
+    console.error('Error cleaning up incremental files:', error);
+  }
+}
 // Helper function to write large JSON data using streaming
 async function writeGuildDataToStreamingJson(guildData, filePath) {
   return new Promise((resolve, reject) => {
