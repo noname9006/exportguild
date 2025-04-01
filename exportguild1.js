@@ -999,7 +999,6 @@ function shouldSaveBasedOnMessageCount() {
     return shouldSave;
   }
   return false;
-}return false;
 
 // Helper function to handle writing large JSON data
 async function writeGuildDataToFile(guildData, filePath, isCompleteExport = false) {
@@ -1044,7 +1043,6 @@ async function writeGuildDataToFile(guildData, filePath, isCompleteExport = fals
 
 // Helper function to write large JSON data using streaming
 async function writeGuildDataToStreamingJson(guildData, filePath, isCompleteExport = false) {
-	async function writeGuildDataToStreamingJson(guildData, filePath, isCompleteExport = false) {
   console.log(`[DEBUG] Starting streaming write to ${filePath}`);
   console.log(`[DEBUG] Guild data channels: ${(guildData.channels || []).length}`);
   console.log(`[DEBUG] Total messages processed: ${totalMessagesProcessed}`);
