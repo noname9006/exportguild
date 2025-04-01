@@ -25,6 +25,9 @@ let lastStatusUpdateCount = 0;
 let rateLimitHits = 0;
 let exportStartTime = null;
 let combinedStatusMessageRef = null; // Single message reference for all status updates
+let lastIncrementalSaveCount = 0; // Track when we last did an incremental save
+let statusMessageSequence = 0; // To track status message sequence
+const INCREMENTAL_SAVE_INTERVAL = 100000; // Save every 100,000 messages
 
 // Utility function to clean up objects by removing undefined and null values
 function cleanObject(obj) {
@@ -87,29 +90,35 @@ async function fetchWithRateLimit(fetchFunction, retries = 0) {
 async function checkAndSendStatusUpdate(channel, guild, currentChannelInfo = '', progressInfo = '') {
   const timeElapsed = getTimeElapsed();
   const speed = getProcessingSpeed();
+  const currentUtcTime = new Date().toISOString(); // Get current UTC time
+  statusMessageSequence++; // Increment sequence number
   
   // Combine all the status information into one message
   const combinedStatusMessage = 
-    `**Guild Export Status**\n` +
+    `**Guild Export Status** (#${statusMessageSequence})\n` +
     `${currentChannelInfo ? `🔄 ${currentChannelInfo}\n` : ''}` +
     `📊 Processed ${totalMessagesProcessed.toLocaleString()} messages from ${guild.name}\n` +
     `⏱️ Time elapsed: ${timeElapsed}\n` +
     `⚡ Processing speed: ${speed} messages/second\n` +
     `${progressInfo ? `📈 ${progressInfo}\n` : ''}` +
-    `🚦 Rate limit hits: ${rateLimitHits}`;
+    `🚦 Rate limit hits: ${rateLimitHits}\n` +
+    `⏰ Last update: ${currentUtcTime}`;
   
   try {
     if (!combinedStatusMessageRef) {
       // If we don't have a reference yet, create a new message
+      console.log('Creating new status message');
       combinedStatusMessageRef = await channel.send(combinedStatusMessage);
     } else {
       // Otherwise try to update the existing message
+      console.log('Updating existing status message');
       await combinedStatusMessageRef.edit(combinedStatusMessage);
     }
   } catch (error) {
     console.error('Error updating status message, sending a new one:', error);
     // If there's an error (e.g., message was deleted), create a new reference
     try {
+      console.log('Creating replacement status message after error');
       combinedStatusMessageRef = await channel.send(combinedStatusMessage);
     } catch (innerError) {
       console.error('Failed to send new message:', innerError);
@@ -188,6 +197,36 @@ async function fetchMessagesFromChannel(channel, originalChannel, guild, channel
       }));
     });
     
+	// Update the total message count
+totalMessagesProcessed += fetchedMessages.size;
+
+// Check if we should do an incremental save
+if (totalMessagesProcessed - lastIncrementalSaveCount >= INCREMENTAL_SAVE_INTERVAL) {
+  // Create temporary guild data with current progress
+  const tempGuildData = {
+    id: guild.id,
+    name: guild.name,
+    exportStartedAt: new Date(exportStartTime).toISOString(),
+    timestamp: Date.now(),
+    channelsProcessedSoFar: guild.channels.cache.filter(c => c.id !== channel.id).size,
+    currentlyProcessing: channel.name,
+    channels: [] // We'll leave this empty for incremental saves to save memory
+  };
+  
+  // Do the incremental save
+  await saveIncrementalData(tempGuildData, guild, originalChannel);
+  
+  // Update the counter for when we last saved
+  lastIncrementalSaveCount = totalMessagesProcessed;
+}
+
+// Check if we should send a status update - use the combined update function
+if (totalMessagesProcessed - lastStatusUpdateCount >= 1000) {
+  // Update the message count in the progress info
+  const progressInfo = `Processing messages: ${messages.length} in current channel (${totalMessagesProcessed.toLocaleString()} total)`;
+  await checkAndSendStatusUpdate(originalChannel, guild, channelStatusInfo, progressInfo);
+}
+	
     // Update the total message count
     totalMessagesProcessed += fetchedMessages.size;
     
@@ -508,11 +547,13 @@ async function exportGuildMessages(guild, originalMessage) {
     channels: []
   };
   
-  // Reset counters and set start time
-  totalMessagesProcessed = 0;
-  lastStatusUpdateCount = 0;
-  rateLimitHits = 0;
-  exportStartTime = new Date();
+// Reset counters and set start time
+totalMessagesProcessed = 0;
+lastStatusUpdateCount = 0;
+lastIncrementalSaveCount = 0; // Reset the incremental save counter
+rateLimitHits = 0;
+statusMessageSequence = 0;
+exportStartTime = new Date();
   
   // Sort channels by type and name
   channels.sort((a, b) => {
@@ -601,6 +642,60 @@ async function exportGuildMessages(guild, originalMessage) {
       `⏱️ Total time: ${getTimeElapsed()}\n` +
       `📁 All data saved to: ${finalFileName}`
     );
+  }
+}
+
+// Helper function for incremental data saves
+async function saveIncrementalData(guildData, guild, originalMessage) {
+  // Create a timestamp for this incremental save
+  const incrementalTimestamp = Date.now();
+  
+  // Create a copy of the guild data with the current state
+  const incrementalData = {
+    ...guildData,
+    incrementalSaveTime: new Date().toISOString(),
+    totalMessagesExportedSoFar: totalMessagesProcessed,
+    isCompleteExport: false
+  };
+  
+  // Generate filename with timestamp to avoid overwriting previous saves
+  const incrementalFileName = path.join(
+    EXPORT_DIR, 
+    `${guild.name.replace(/[^a-z0-9]/gi, '_')}_${guild.id}_incremental_${incrementalTimestamp}.json`
+  );
+  
+  try {
+    // Write the incremental file
+    fs.writeFileSync(incrementalFileName, JSON.stringify(incrementalData, null, 2));
+    
+    await originalMessage.channel.send(
+      `💾 **Incremental save complete!**\n` +
+      `Saved ${totalMessagesProcessed.toLocaleString()} messages processed so far\n` +
+      `📁 Data saved to: ${incrementalFileName}`
+    );
+    
+    return true;
+  } catch (error) {
+    console.error('Error writing incremental export file:', error);
+    
+    // Try streaming approach if regular write fails
+    try {
+      await writeGuildDataToStreamingJson(incrementalData, incrementalFileName);
+      
+      await originalMessage.channel.send(
+        `💾 **Incremental save complete! (streaming method)**\n` +
+        `Saved ${totalMessagesProcessed.toLocaleString()} messages processed so far\n` +
+        `📁 Data saved to: ${incrementalFileName}`
+      );
+      
+      return true;
+    } catch (streamError) {
+      console.error('Error with streaming incremental write:', streamError);
+      await originalMessage.channel.send(
+        `⚠️ Failed to save incremental data at ${totalMessagesProcessed.toLocaleString()} messages.`
+      );
+      return false;
+    }
   }
 }
 
