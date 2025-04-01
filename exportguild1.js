@@ -999,6 +999,7 @@ function shouldSaveBasedOnMessageCount() {
     return shouldSave;
   }
   return false;
+}
 
 // Helper function to handle writing large JSON data
 async function writeGuildDataToFile(guildData, filePath, isCompleteExport = false) {
