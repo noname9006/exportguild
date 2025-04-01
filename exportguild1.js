@@ -1252,6 +1252,7 @@ console.log(`[DEBUG] Absolute path: ${path.resolve(outputFileName)}`);
     if (global.gc) {
       try { global.gc(); } catch (e) { /* Continue */ }
     }
+  }
   
   // Save any remaining channels
   if (processedChannels.length > 0) {
