@@ -1232,7 +1232,7 @@ console.log(`[DEBUG] Absolute path: ${path.resolve(outputFileName)}`);
         processedChannels.push(channelData);
         
         // Check if we should save and clear memory
-        if (shouldSaveBasedOnMessageCount() || processedChannels.length >= 5) {
+        if (shouldSaveBasedOnMessageCount() {
   console.log(`[DEBUG] Save triggered in main loop: ${totalMessagesProcessed} messages, ${processedChannels.length} channels`);
   processedChannels = await saveExportProgress(guild, processedChannels, outputFileName, originalMessage.channel);
   console.log(`[DEBUG] After saving, processedChannels.length = ${processedChannels.length}`);
@@ -1252,7 +1252,6 @@ console.log(`[DEBUG] Absolute path: ${path.resolve(outputFileName)}`);
     if (global.gc) {
       try { global.gc(); } catch (e) { /* Continue */ }
     }
-  }
   
   // Save any remaining channels
   if (processedChannels.length > 0) {
