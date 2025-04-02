@@ -301,6 +301,19 @@ async function fetchMessagesFromChannel(channel, originalChannel, guild, channel
     }
   }
   
+  console.log(`[DEBUG] End of batch - Total: ${totalMessagesProcessed}, Last saved: ${lastSavedMessageCount}`);
+console.log(`[DEBUG] Current threshold: ${Math.floor(totalMessagesProcessed / MESSAGES_BEFORE_SAVE)}, Last threshold: ${Math.floor(lastSavedMessageCount / MESSAGES_BEFORE_SAVE)}`);
+console.log(`[DEBUG] Should save? ${shouldSaveBasedOnMessageCount()}`);
+
+// Force a save check after each batch of 1000 messages
+if (totalMessagesProcessed - lastSavedMessageCount >= 1000) {
+  console.log(`[FORCE CHECK] Checking if we should save at ${totalMessagesProcessed} messages`);
+  if (shouldSaveBasedOnMessageCount()) {
+    console.log(`[FORCE SAVE] Trigger save at ${totalMessagesProcessed} messages`);
+    // Don't actually save here, just log it
+  }
+}
+  
   return messages;
 }
 
@@ -594,7 +607,19 @@ async function saveChannelDataToFile(guild, outputFileName, channelData) {
       
       fs.writeFileSync(outputFileName, JSON.stringify(initialData));
     }
-    
+	
+    console.log(`[DEBUG] Attempting to save to: ${outputFileName}`);
+console.log(`[DEBUG] Directory exists: ${fs.existsSync(path.dirname(outputFileName))}`);
+console.log(`[DEBUG] File already exists: ${fs.existsSync(outputFileName)}`);
+try {
+  const testFile = `${outputFileName}.test`;
+  fs.writeFileSync(testFile, 'Test write permissions');
+  fs.unlinkSync(testFile);
+  console.log(`[DEBUG] Write permissions confirmed for output directory`);
+} catch (error) {
+  console.error(`[DEBUG] PERMISSIONS ERROR: Cannot write to output directory:`, error);
+}
+	
     // Read current data
     const fileContent = fs.readFileSync(outputFileName);
     const guildData = JSON.parse(fileContent);
@@ -645,6 +670,18 @@ async function saveProcessedDataToFile(guild, outputFileName, threadDataList) {
       
       fs.writeFileSync(outputFileName, JSON.stringify(initialData));
     }
+	
+	console.log(`[DEBUG] Attempting to save to: ${outputFileName}`);
+console.log(`[DEBUG] Directory exists: ${fs.existsSync(path.dirname(outputFileName))}`);
+console.log(`[DEBUG] File already exists: ${fs.existsSync(outputFileName)}`);
+try {
+  const testFile = `${outputFileName}.test`;
+  fs.writeFileSync(testFile, 'Test write permissions');
+  fs.unlinkSync(testFile);
+  console.log(`[DEBUG] Write permissions confirmed for output directory`);
+} catch (error) {
+  console.error(`[DEBUG] PERMISSIONS ERROR: Cannot write to output directory:`, error);
+}
     
     // Read current data
     const fileContent = fs.readFileSync(outputFileName);
@@ -672,12 +709,16 @@ async function saveProcessedDataToFile(guild, outputFileName, threadDataList) {
     fs.writeFileSync(outputFileName, JSON.stringify(guildData));
     
     console.log(`Saved thread data to ${outputFileName} (${totalMessagesProcessed.toLocaleString()} messages so far)`);
+	
+	 lastSavedMessageCount = totalMessagesProcessed;
     
     // Force garbage collection if available
     if (global.gc) {
       try { global.gc(); } catch (e) { /* Continue */ }
     }
-    
+	
+    lastSavedMessageCount = totalMessagesProcessed;
+	
     return true;
   } catch (error) {
     console.error('Error saving thread data to file:', error);
@@ -871,15 +912,31 @@ async function finalizeExportFile(guild, outputFileName, originalMessage) {
 
 // Check if we need to save data based on message count
 function shouldSaveBasedOnMessageCount() {
-  console.log(`[DEBUG] Checking save condition - Total: ${totalMessagesProcessed}, MESSAGES_BEFORE_SAVE: ${MESSAGES_BEFORE_SAVE}, Last Saved: ${lastSavedMessageCount}`);
+  const totalMessages = totalMessagesProcessed;
+  const lastSaved = lastSavedMessageCount;
   
-  // Get current and previous threshold
-  const currentThreshold = Math.floor(totalMessagesProcessed / MESSAGES_BEFORE_SAVE);
-  const lastThreshold = Math.floor(lastSavedMessageCount / MESSAGES_BEFORE_SAVE);
+  console.log(`[DEBUG] Checking save: Total=${totalMessages}, LastSaved=${lastSaved}, Diff=${totalMessages-lastSaved}`);
   
-  // If we've crossed to a new threshold multiple, save
-  if (currentThreshold > lastThreshold) {
-    console.log(`[DEBUG] Should save for new threshold ${currentThreshold}: ${totalMessagesProcessed}`);
+  // Option 1: Save every 10,000 messages exactly
+  if (totalMessages % MESSAGES_BEFORE_SAVE === 0 && totalMessages > 0) {
+    console.log(`[DEBUG] Should save at exact ${MESSAGES_BEFORE_SAVE} multiple: ${totalMessages}`);
+    return true;
+  }
+  
+  // Option 2: Save when we've crossed a 10,000 threshold since last save
+  const currentThreshold = Math.floor(totalMessages / MESSAGES_BEFORE_SAVE);
+  const lastSavedThreshold = Math.floor(lastSaved / MESSAGES_BEFORE_SAVE);
+  
+  console.log(`[DEBUG] Current threshold=${currentThreshold}, Last threshold=${lastSavedThreshold}`);
+  
+  if (currentThreshold > lastSavedThreshold) {
+    console.log(`[DEBUG] Should save - crossed threshold: ${currentThreshold * MESSAGES_BEFORE_SAVE}`);
+    return true;
+  }
+  
+  // Option 3: Force save when lots of messages since last save
+  if (totalMessages - lastSaved > MESSAGES_BEFORE_SAVE) {
+    console.log(`[DEBUG] Force save after ${totalMessages - lastSaved} unsaved messages`);
     return true;
   }
   
@@ -1101,6 +1158,14 @@ console.log(`[DEBUG] Absolute path: ${path.resolve(outputFileName)}`);
   for (let i = 0; i < channels.length; i++) {
     const channel = channels[i];
     
+	if (totalMessagesProcessed - lastSavedMessageCount >= 5000) {
+  console.log(`[MAIN LOOP] Many unsaved messages (${totalMessagesProcessed - lastSavedMessageCount}), forcing save check`);
+  if (shouldSaveBasedOnMessageCount() || totalMessagesProcessed - lastSavedMessageCount >= MESSAGES_BEFORE_SAVE) {
+    console.log(`[MAIN LOOP] Forcing save of ${processedChannels.length} channels at ${totalMessagesProcessed} messages`);
+    processedChannels = await saveExportProgress(guild, processedChannels, outputFileName, originalMessage.channel);
+  }
+}
+	
     // Create the channel info text
     const currentChannelInfo = `Processing channel ${i+1}/${channels.length}: ${channel.name}`;
     
