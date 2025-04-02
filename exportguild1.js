@@ -688,124 +688,6 @@ async function saveProcessedDataToFile(guild, outputFileName, threadDataList) {
   }
 }
 
-// Export all messages from a guild
-async function exportGuildMessages(guild, originalMessage) {
-  // Create export directory if needed
-  if (!fs.existsSync(EXPORT_DIR)) {
-    fs.mkdirSync(EXPORT_DIR, { recursive: true });
-  }
-  
-  // IMPORTANT: Explicitly set the reference to null at the start
-  combinedStatusMessageRef = null;
-  
-  // Get all channels we want to export
-  const channels = Array.from(guild.channels.cache.filter(channel => 
-    (channel.type === ChannelType.GuildText || 
-     channel.type === ChannelType.GuildForum || 
-     channel.type === ChannelType.PublicThread || 
-     channel.type === ChannelType.PrivateThread || 
-     channel.type === ChannelType.AnnouncementThread) &&
-    channel.viewable
-  ).values());
-  
-  // Initialize guild data for a single complete export
-  const timestamp = Date.now();
-  const guildData = {
-    id: guild.id,
-    name: guild.name,
-    exportStartedAt: new Date().toISOString(),
-    timestamp: timestamp,
-    totalChannelsToProcess: channels.length,
-    channels: []
-  };
-  
-  
-  // Initialize the output file with empty structure
-  fs.writeFileSync(outputFileName, JSON.stringify(guildData));
-  
-  // Reset counters and set start time
-  totalMessagesProcessed = 0;
-  lastStatusUpdateCount = 0;
-  rateLimitHits = 0;
-  statusMessageSequence = 0;
-  exportStartTime = new Date();
-  
-  // Sort channels by type and name
-  channels.sort((a, b) => {
-    if (a.type !== b.type) return a.type - b.type;
-    return a.name.localeCompare(b.name);
-  });
-  
-  await originalMessage.channel.send(`Found ${channels.length} channels to process (including text channels, forums, and threads).`);
-  
-  // Process channels one by one to avoid memory issues
-  for (let i = 0; i < channels.length; i++) {
-    const channel = channels[i];
-    
-    // Create the channel info text
-    const currentChannelInfo = `Processing channel ${i+1}/${channels.length}: ${channel.name}`;
-    
-    // Create the progress info text
-    const progressInfo = `Progress: ${i}/${channels.length} channels processed`;
-    
-    // Update the combined status message with both channel and progress info
-    await checkAndSendStatusUpdate(originalMessage.channel, guild, currentChannelInfo, progressInfo);
-    
-    // Process this channel
-    const channelData = await processChannel(channel, guild.id, originalMessage.channel, guild, currentChannelInfo, outputFileName);
-    
-    // Only add to memory if not already saved to file
-    if (channelData !== null) {
-      // Save this channel data to file
-      await saveChannelDataToFile(guild, outputFileName, channelData);
-    }
-    
-    // Add a small delay between channels
-    if (i < channels.length - 1) {
-      const delay = Math.min(1000 + rateLimitHits * 200, 5000);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-    
-    // Try to trigger garbage collection if available
-    if (global.gc) {
-      try { global.gc(); } catch (e) { /* Continue */ }
-    }
-  }
-  
-  // Final update of the export file with completion info
-  try {
-    // Read the current state of the file
-    const fileContent = fs.readFileSync(outputFileName);
-    const finalGuildData = JSON.parse(fileContent);
-    
-    // Update export metadata
-    finalGuildData.exportCompletedAt = new Date().toISOString();
-    finalGuildData.totalMessagesExported = totalMessagesProcessed;
-    finalGuildData.totalChannelsExported = finalGuildData.channels.length;
-    finalGuildData.exportDurationMs = new Date() - exportStartTime;
-    
-    // Write the final version
-    fs.writeFileSync(outputFileName, JSON.stringify(finalGuildData));
-    
-    await originalMessage.reply(
-      `Export complete!\n` +
-      `✅ Exported ${totalMessagesProcessed.toLocaleString()} messages from ${finalGuildData.channels.length} channels\n` +
-      `⏱️ Total time: ${getTimeElapsed()}\n` +
-      `📁 All data saved to: ${outputFileName}`
-    );
-  } catch (error) {
-    console.error('Error finalizing export file:', error);
-    
-    await originalMessage.reply(
-      `Export process finished but encountered an error finalizing the file.\n` +
-      `✅ Processed ${totalMessagesProcessed.toLocaleString()} messages\n` +
-      `⏱️ Total time: ${getTimeElapsed()}\n` +
-      `📁 Data saved to: ${outputFileName}\n` +
-      `⚠️ Error: ${error.message}`
-    );
-  }
-}
-
 // Initialize the Discord client
 client.once('ready', () => {
   console.log(`Bot is ready! Logged in as ${client.user.tag}`);
@@ -820,12 +702,17 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(PREFIX.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  if (command === 'exportguild') {
-    await message.reply('Starting full guild message export (including threads and forums)... This may take a long time depending on the number of channels and messages.');
+if (command === 'exportguild') {
+  await message.reply('Starting full guild message export (including threads and forums)... This may take a long time depending on the number of channels and messages.');
+  
+  try {
+    // Add debug information about the environment
+    console.log(`[DEBUG] Current directory: ${process.cwd()}`);
+    console.log(`[DEBUG] Export directory: ${path.resolve(EXPORT_DIR)}`);
+    console.log(`[DEBUG] Can write to export directory: ${fs.existsSync(EXPORT_DIR) && fs.accessSync(EXPORT_DIR, fs.constants.W_OK)}`);
     
-    try {
-      const guildId = args[0] || message.guild.id;
-      const guild = client.guilds.cache.get(guildId);
+    const guildId = args[0] || message.guild.id;
+    const guild = client.guilds.cache.get(guildId);
       
       if (!guild) {
         return message.reply('Guild not found. Please specify a valid guild ID.');
