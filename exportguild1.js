@@ -1232,7 +1232,7 @@ console.log(`[DEBUG] Absolute path: ${path.resolve(outputFileName)}`);
         processedChannels.push(channelData);
         
         // Check if we should save and clear memory
-        if (shouldSaveBasedOnMessageCount() {
+        if (shouldSaveBasedOnMessageCount()) {
   console.log(`[DEBUG] Save triggered in main loop: ${totalMessagesProcessed} messages, ${processedChannels.length} channels`);
   processedChannels = await saveExportProgress(guild, processedChannels, outputFileName, originalMessage.channel);
   console.log(`[DEBUG] After saving, processedChannels.length = ${processedChannels.length}`);
@@ -1537,52 +1537,6 @@ async function processThreads(channel, channelData, originalChannel, guild, chan
   
   return threadDataList;
 }
-
-// Handle commands
-client.on('messageCreate', async (message) => {
-  // Ignore messages from bots and messages without our prefix
-  if (message.author.bot || !message.content.startsWith(PREFIX)) return;
-
-  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-  const command = args.shift().toLowerCase();
-
-  if (command === 'exportguild') {
-    await message.reply('Starting full guild message export (including threads and forums)... This may take a long time depending on the number of channels and messages.');
-    
-    try {
-      const guildId = args[0] || message.guild.id;
-      const guild = client.guilds.cache.get(guildId);
-      
-      if (!guild) {
-        return message.reply('Guild not found. Please specify a valid guild ID.');
-      }
-      
-      // Reset counters and set start time
-      totalMessagesProcessed = 0;
-      lastStatusUpdateCount = 0;
-      rateLimitHits = 0;
-      exportStartTime = new Date();
-      
-      // IMPORTANT: Explicitly reset the message reference
-      combinedStatusMessageRef = null;
-      
-      await exportGuildMessages(guild, message);
-    } catch (error) {
-      console.error('Error during export:', error);
-      message.reply('An error occurred during export. Check console for details.');
-    }
-  } else if (command === 'help') {
-    message.reply(`
-**Available Commands**
-\`${PREFIX}exportguild [guildId]\` - Export all messages from a guild. Uses current guild if no ID provided.
-\`${PREFIX}help\` - Show this help message.
-
-**Status**
-Current Time: ${new Date().toISOString()}
-Current User: noname9006
-`);
-  }
-});
 
 // Handle errors to prevent crashes
 client.on('error', (error) => {
