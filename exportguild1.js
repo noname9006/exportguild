@@ -216,7 +216,7 @@ async function checkAndSendStatusUpdate(channel, guild, currentChannelInfo = '',
 }
 
 // Function to fetch messages from a channel with pagination
-async function fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo = '') {
+async function fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo = '', outputFileName = null) {
   const messages = [];
   let lastMessageId = null;
   let batchCount = 0;
@@ -310,7 +310,27 @@ if (totalMessagesProcessed - lastSavedMessageCount >= 1000) {
   console.log(`[FORCE CHECK] Checking if we should save at ${totalMessagesProcessed} messages`);
   if (shouldSaveBasedOnMessageCount()) {
     console.log(`[FORCE SAVE] Trigger save at ${totalMessagesProcessed} messages`);
-    // Don't actually save here, just log it
+    // FIXED: Actually perform the save here
+    try {
+      // We need to save the current batch - pass this to the channel or guild object
+      if (originalChannel && guild && typeof outputFileName !== 'undefined') {
+        console.log(`[DEBUG] Forcing save of current batch (${messages.length} messages)`);
+        await saveExportProgress(guild, [{
+          id: channel.id,
+          name: channel.name,
+          type: channel.type,
+          messages: messages
+        }], outputFileName, originalChannel);
+      } else {
+        console.log(`[DEBUG] Cannot save - missing parameters`, { 
+          hasOriginalChannel: !!originalChannel,
+          hasGuild: !!guild,
+          hasFileName: typeof outputFileName !== 'undefined'
+        });
+      }
+    } catch (saveError) {
+      console.error(`[ERROR] Failed to force save: ${saveError.message}`);
+    }
   }
 }
   
@@ -516,7 +536,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
     // If it's a forum channel
     if (channel.type === ChannelType.GuildForum) {
       // Get forum messages (usually just metadata)
-      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo);
+const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (messages.length > 0) {
         // Sort messages chronologically
@@ -536,7 +556,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
     // If it's a regular text channel
     else if (channel.type === ChannelType.GuildText) {
       // Get messages from the channel
-      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo);
+     const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (messages.length > 0) {
         // Sort messages chronologically
@@ -561,7 +581,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
       channel.type === ChannelType.PrivateThread || 
       channel.type === ChannelType.AnnouncementThread
     ) {
-      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo);
+const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (messages.length > 0) {
         // Sort messages chronologically
@@ -716,8 +736,6 @@ try {
     if (global.gc) {
       try { global.gc(); } catch (e) { /* Continue */ }
     }
-	
-    lastSavedMessageCount = totalMessagesProcessed;
 	
     return true;
   } catch (error) {
@@ -1254,7 +1272,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
     // If it's a forum channel
     if (channel.type === ChannelType.GuildForum) {
       // Get forum messages (usually just metadata)
-      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo);
+const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (messages.length > 0) {
         // Sort messages chronologically
@@ -1274,7 +1292,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
     // If it's a regular text channel
     else if (channel.type === ChannelType.GuildText) {
       // Get messages from the channel
-      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo);
+const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (messages.length > 0) {
         // Sort messages chronologically
@@ -1299,7 +1317,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
       channel.type === ChannelType.PrivateThread || 
       channel.type === ChannelType.AnnouncementThread
     ) {
-      const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo);
+const messages = await fetchMessagesFromChannel(channel, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (messages.length > 0) {
         // Sort messages chronologically
@@ -1330,7 +1348,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
 }
 
 // Process threads in a channel or forum
-async function processThreads(channel, channelData, originalChannel, guild, channelStatusInfo = '') {
+async function processThreads(channel, channelData, originalChannel, guild, channelStatusInfo = '', outputFileName) {
   // Get all active threads with backoff retry
   let activeThreads;
   try {
