@@ -1112,7 +1112,7 @@ console.log(`[DEBUG] Absolute path: ${path.resolve(outputFileName)}`);
     
     // Process this channel
     try {
-      const channelData = await processChannel(channel, guild.id, originalMessage.channel, guild, currentChannelInfo);
+      const channelData = await processChannel(channel, guild.id, originalMessage.channel, guild, currentChannelInfo, outputFileName);
       
       if (channelData) {
         // Add to our local array
@@ -1176,7 +1176,7 @@ console.log(`[DEBUG] Absolute path: ${path.resolve(outputFileName)}`);
 }
 
 // Process an individual channel
-async function processChannel(channel, guildId, originalChannel, guild, channelStatusInfo = '') {
+async function processChannel(channel, guildId, originalChannel, guild, channelStatusInfo = '', outputFileName) {
   try {
     console.log(`Processing channel: ${channel.name} (${channel.id})`);
     
@@ -1199,7 +1199,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
       }
       
       // Get all threads in the forum
-      const threads = await processThreads(channel, channelData, originalChannel, guild, channelStatusInfo);
+      const threads = await processThreads(channel, channelData, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (threads && threads.length > 0) {
         channelData.threadsCount = threads.length;
@@ -1221,7 +1221,7 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
       }
       
       // Get all threads in the text channel
-      const threads = await processThreads(channel, channelData, originalChannel, guild, channelStatusInfo);
+      const threads = await processThreads(channel, channelData, originalChannel, guild, channelStatusInfo, outputFileName);
       
       if (threads && threads.length > 0) {
         channelData.threadsCount = threads.length;
