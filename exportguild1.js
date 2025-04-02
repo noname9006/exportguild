@@ -479,13 +479,11 @@ async function processThreads(channel, channelData, originalChannel, guild, chan
   });
   
   // Check if we need to save to file based on message count
-  if (totalMessagesProcessed >= MESSAGES_BEFORE_SAVE) {
-    // Check if we've crossed a threshold to save data
-    const messagesOverThreshold = totalMessagesProcessed % MESSAGES_BEFORE_SAVE;
-    if (messagesOverThreshold < 10000) { // Within 10000 messages after threshold
-      await saveProcessedDataToFile(guild, outputFileName, threadDataList);
-      return []; // Return empty array since data has been saved
-    }
+  if (shouldSaveBasedOnMessageCount()) {
+  console.log(`[DEBUG] Save triggered in processThreads at ${totalMessagesProcessed} messages`);
+  await saveProcessedDataToFile(guild, outputFileName, threadDataList);
+  return [];
+}
   }
   
   return threadDataList;
@@ -565,14 +563,11 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
     }
     
     // Check if we've reached message threshold and need to save
-    if (totalMessagesProcessed >= MESSAGES_BEFORE_SAVE) {
-      // Check if we've crossed a threshold to save data
-      const messagesOverThreshold = totalMessagesProcessed % MESSAGES_BEFORE_SAVE;
-      if (messagesOverThreshold < 10000) { // Within 10000 messages after threshold
-        await saveChannelDataToFile(guild, outputFileName, channelData);
-        return null; // Return null since data has been saved
-      }
-    }
+    if (shouldSaveBasedOnMessageCount()) {
+  console.log(`[DEBUG] Save triggered in processChannel at ${totalMessagesProcessed} messages`);
+  await saveChannelDataToFile(guild, outputFileName, channelData);
+  return null;
+}
     
     return channelData;
   } catch (error) {
