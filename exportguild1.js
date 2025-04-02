@@ -8,7 +8,7 @@ require('dotenv').config();
 const PREFIX = '!'; // Command prefix
 const EXPORT_DIR = './exports'; // Directory to save exports
 const MAX_RATE_LIMIT_RETRIES = 5; // Maximum retries when rate limited
-const MESSAGES_BEFORE_SAVE = 10000; // Save every 100,000 messages
+const MESSAGES_BEFORE_SAVE = 10000; // Save every n messages
 
 // Test write permissions to the export directory
 console.log(`[DEBUG] Testing write permissions to ${EXPORT_DIR} directory...`);
@@ -874,17 +874,19 @@ async function finalizeExportFile(guild, outputFileName, originalMessage) {
 
 // Check if we need to save data based on message count
 function shouldSaveBasedOnMessageCount() {
-  console.log(`[DEBUG] Checking if should save: ${totalMessagesProcessed} messages processed`);
-  console.log(`[DEBUG] MESSAGES_BEFORE_SAVE: ${MESSAGES_BEFORE_SAVE}`);
-  console.log(`[DEBUG] Messages over threshold: ${totalMessagesProcessed % MESSAGES_BEFORE_SAVE}`);
-  
-  if (totalMessagesProcessed >= MESSAGES_BEFORE_SAVE) {
-    const messagesOverThreshold = totalMessagesProcessed % MESSAGES_BEFORE_SAVE;
-    // Save if we're within 10,000 messages after crossing the threshold
-    const shouldSave = messagesOverThreshold < 10000;
-    console.log(`[DEBUG] Should save: ${shouldSave}`);
-    return shouldSave;
+  // Save after every MESSAGES_BEFORE_SAVE messages (e.g., at 10K, 20K, 30K)
+  if (totalMessagesProcessed > 0 && totalMessagesProcessed % MESSAGES_BEFORE_SAVE === 0) {
+    console.log(`[DEBUG] Should save at exact ${MESSAGES_BEFORE_SAVE} multiple: ${totalMessagesProcessed}`);
+    return true;
   }
+  
+  // Also save if we're slightly past a threshold (to catch any edge cases)
+  const remainder = totalMessagesProcessed % MESSAGES_BEFORE_SAVE;
+  if (remainder > 0 && remainder < 100 && totalMessagesProcessed > MESSAGES_BEFORE_SAVE) {
+    console.log(`[DEBUG] Should save slightly past threshold: ${totalMessagesProcessed}`);
+    return true;
+  }
+  
   return false;
 }
 
