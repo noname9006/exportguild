@@ -484,7 +484,6 @@ async function processThreads(channel, channelData, originalChannel, guild, chan
   await saveProcessedDataToFile(guild, outputFileName, threadDataList);
   return [];
 }
-  }
   
   return threadDataList;
 }
