@@ -8,7 +8,7 @@ require('dotenv').config();
 const PREFIX = '!'; // Command prefix
 const EXPORT_DIR = './exports'; // Directory to save exports
 const MAX_RATE_LIMIT_RETRIES = 5; // Maximum retries when rate limited
-const MESSAGES_BEFORE_SAVE = 100000; // Save every 100,000 messages
+const MESSAGES_BEFORE_SAVE = 10000; // Save every 100,000 messages
 
 // Test write permissions to the export directory
 console.log(`[DEBUG] Testing write permissions to ${EXPORT_DIR} directory...`);
