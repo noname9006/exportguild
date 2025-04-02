@@ -47,6 +47,7 @@ let exportStartTime = null;
 let combinedStatusMessageRef = null; // Single message reference for all status updates
 let statusMessageSequence = 0; // To track status message sequence
 let readyMessageShown = false; // Flag to prevent duplicate ready messages
+let lastSavedMessageCount = 0;
 
 // Utility function to clean up objects by removing undefined and null values
 function cleanObject(obj) {
@@ -611,6 +612,8 @@ async function saveChannelDataToFile(guild, outputFileName, channelData) {
     fs.writeFileSync(outputFileName, JSON.stringify(guildData));
     
     console.log(`Saved data to ${outputFileName} (${totalMessagesProcessed.toLocaleString()} messages so far)`);
+	
+	    lastSavedMessageCount = totalMessagesProcessed;
     
     // Force garbage collection if available
     if (global.gc) {
@@ -868,16 +871,15 @@ async function finalizeExportFile(guild, outputFileName, originalMessage) {
 
 // Check if we need to save data based on message count
 function shouldSaveBasedOnMessageCount() {
-  // Save after every MESSAGES_BEFORE_SAVE messages (e.g., at 10K, 20K, 30K)
-  if (totalMessagesProcessed > 0 && totalMessagesProcessed % MESSAGES_BEFORE_SAVE === 0) {
-    console.log(`[DEBUG] Should save at exact ${MESSAGES_BEFORE_SAVE} multiple: ${totalMessagesProcessed}`);
-    return true;
-  }
+  console.log(`[DEBUG] Checking save condition - Total: ${totalMessagesProcessed}, MESSAGES_BEFORE_SAVE: ${MESSAGES_BEFORE_SAVE}, Last Saved: ${lastSavedMessageCount}`);
   
-  // Also save if we're slightly past a threshold (to catch any edge cases)
-  const remainder = totalMessagesProcessed % MESSAGES_BEFORE_SAVE;
-  if (remainder > 0 && remainder < 100 && totalMessagesProcessed > MESSAGES_BEFORE_SAVE) {
-    console.log(`[DEBUG] Should save slightly past threshold: ${totalMessagesProcessed}`);
+  // Get current and previous threshold
+  const currentThreshold = Math.floor(totalMessagesProcessed / MESSAGES_BEFORE_SAVE);
+  const lastThreshold = Math.floor(lastSavedMessageCount / MESSAGES_BEFORE_SAVE);
+  
+  // If we've crossed to a new threshold multiple, save
+  if (currentThreshold > lastThreshold) {
+    console.log(`[DEBUG] Should save for new threshold ${currentThreshold}: ${totalMessagesProcessed}`);
     return true;
   }
   
@@ -1030,6 +1032,8 @@ async function saveExportProgress(guild, currentChannels, outputFileName, origin
     
     // Write to file
     await writeGuildDataToFile(guildData, outputFileName);
+	
+	lastSavedMessageCount = totalMessagesProcessed;
     
     // Return an empty array after saving to clear memory
     return [];
@@ -1244,10 +1248,19 @@ async function processChannel(channel, guildId, originalChannel, guild, channelS
       }
     }
     
+    // When checking for save condition, add this debug statement right before the condition
+    console.log(`[DEBUG] Now at ${totalMessagesProcessed} total messages, checking save condition: ${shouldSaveBasedOnMessageCount()}`);
+    
+    // Check if we've reached message threshold and need to save
+    if (shouldSaveBasedOnMessageCount()) {
+      console.log(`[DEBUG] Save triggered in processChannel at ${totalMessagesProcessed} messages`);
+      await saveChannelDataToFile(guild, outputFileName, channelData);
+      return null;
+    }
+    
     return channelData;
   } catch (error) {
-    console.error(`Error processing channel ${channel.name}:`, error);
-    return null;
+    // Error handling...
   }
 }
 
@@ -1417,6 +1430,16 @@ async function processThreads(channel, channelData, originalChannel, guild, chan
     if (!b.firstMessageTimestamp) return -1;
     return a.firstMessageTimestamp - b.firstMessageTimestamp;
   });
+  
+ // Near the end of the function, add this debug statement right before the save condition
+  console.log(`[DEBUG] Now at ${totalMessagesProcessed} total messages, checking save condition: ${shouldSaveBasedOnMessageCount()}`);
+  
+  // Check if we need to save to file based on message count
+  if (shouldSaveBasedOnMessageCount()) {
+    console.log(`[DEBUG] Save triggered in processThreads at ${totalMessagesProcessed} messages`);
+    await saveProcessedDataToFile(guild, outputFileName, threadDataList);
+    return [];
+  }
   
   return threadDataList;
 }
