@@ -36,15 +36,15 @@ const excludedChannels = process.env.EX_CHANNELS ?
 const EXPORT_THRESHOLD = parseInt(process.env.METADATA_EXPORT_THRESHOLD) || 10000;
 
 // Memory limit in MB - default to 500MB if not specified
-const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT) || 500;
+const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB) || 500;
 // Convert to bytes for easier comparison with process.memoryUsage()
 const MEMORY_LIMIT_BYTES = MEMORY_LIMIT_MB * 1024 * 1024;
 
 // Memory check frequency in milliseconds
-const MEMORY_CHECK_INTERVAL = 10000; // Check every 10 seconds
+const MEMORY_CHECK_INTERVAL = parseInt(process.env.MEMORY_CHECK_INTERVAL) || 10000; // Default: check every 10 seconds
 
 // Auto-save interval in milliseconds (save every 30 seconds)
-const AUTO_SAVE_INTERVAL = 30000;
+const AUTO_SAVE_INTERVAL = parseInt(process.env.AUTO_SAVE_INTERVAL) || 30000; // Default: save every 30 seconds
 
 // Maximum concurrent API requests
 const MAX_CONCURRENT_REQUESTS = 5;
