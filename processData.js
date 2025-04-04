@@ -29,10 +29,19 @@ function formatDate(dateString) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+// Calculate days between two dates
+function daysBetween(date1, date2) {
+  const oneDay = 24 * 60 * 60 * 1000; // hours*minutes*seconds*milliseconds
+  const diffDays = Math.round(Math.abs((date1 - date2) / oneDay));
+  return diffDays;
+}
+
 // Process NDJSON file and create CSV reports
 async function processNDJSON(message) {
   try {
     const guild = message.guild;
+    // Get the current date for calculating days on server
+    const currentDate = new Date();
     
     const statusMessage = await message.channel.send(
       `Data Processing Status\n` +
@@ -69,7 +78,12 @@ async function processNDJSON(message) {
     const userSymbolCounts = new Map(); // userId -> total symbol count
     const userDailySymbols = new Map(); // userId -> Map of date -> symbol count
     const usernames = new Map(); // userId -> username
+    const userActiveDays = new Map(); // userId -> Set of active days
     const allDates = new Set(); // All unique dates in the dataset
+    
+    // For calculating average symbols per message
+    let totalMessages = 0;
+    let totalSymbols = 0;
 
     // Process each line
     let lineCount = 0;
@@ -94,6 +108,10 @@ async function processNDJSON(message) {
           const content = data.content || "";
           const symbolCount = content.length;
           
+          // Track total messages and symbols for average calculation
+          totalMessages++;
+          totalSymbols += symbolCount;
+          
           // Store username
           usernames.set(userId, username);
           
@@ -105,6 +123,12 @@ async function processNDJSON(message) {
             userMessages.set(userId, []);
           }
           userMessages.get(userId).push(date);
+          
+          // Track active days
+          if (!userActiveDays.has(userId)) {
+            userActiveDays.set(userId, new Set());
+          }
+          userActiveDays.get(userId).add(date);
           
           // Track total symbol count
           userSymbolCounts.set(userId, (userSymbolCounts.get(userId) || 0) + symbolCount);
@@ -134,16 +158,25 @@ async function processNDJSON(message) {
     // Get all user IDs
     const userIds = Array.from(usernames.keys());
     const userRoles = new Map(); // userId -> highest role name
+    const userDisplayNames = new Map(); // userId -> display name
+    const userJoinDates = new Map(); // userId -> join date
+    const userTotalDays = new Map(); // userId -> total days on server
     
     // Initialize these variables outside of any conditional blocks
     let processedCount = 0;
-    const totalMembers = userIds.length;
+    const uniqueMessageUserCount = userIds.length;
+    
+    // Set to keep track of users currently on the server
+    const currentServerUsers = new Set();
 
     // Handle roles based on flag
     if (skipRoles) {
       // Skip role fetching, just set placeholder
       for (const userId of userIds) {
         userRoles.set(userId, "Not Fetched");
+        userDisplayNames.set(userId, "Not Fetched");
+        userJoinDates.set(userId, "Unknown");
+        userTotalDays.set(userId, "Unknown");
       }
       
       // No users have roles, so processedCount remains 0
@@ -170,6 +203,9 @@ async function processNDJSON(message) {
       // Default all to "Not in server" initially
       for (const userId of userIds) {
         userRoles.set(userId, "Not in server");
+        userDisplayNames.set(userId, usernames.get(userId) || "Unknown");
+        userJoinDates.set(userId, "Not in server");
+        userTotalDays.set(userId, "N/A");
       }
       
       // First check the cache
@@ -178,17 +214,31 @@ async function processNDJSON(message) {
         const userId = member.user.id;
         if (membersToCheck.has(userId)) {
           userRoles.set(userId, member.roles.highest.name || "No Role");
+          userDisplayNames.set(userId, member.displayName || member.user.username);
+          
+          // Get join date and calculate days on server
+          const joinDate = member.joinedAt;
+          if (joinDate) {
+            const formattedJoinDate = formatDate(joinDate);
+            userJoinDates.set(userId, formattedJoinDate);
+            userTotalDays.set(userId, daysBetween(currentDate, joinDate));
+          } else {
+            userJoinDates.set(userId, "Unknown");
+            userTotalDays.set(userId, "Unknown");
+          }
+          
           membersToCheck.delete(userId);
           cachedCount++;
           processedCount++;
+          currentServerUsers.add(userId); // Mark user as currently on server
           
           // Update status occasionally
-          if (processedCount % 100 === 0 || processedCount === totalMembers) {
+          if (processedCount % 100 === 0 || processedCount === uniqueMessageUserCount) {
             statusMessage.edit(
               `Data Processing Status\n` +
               `🔄 Processing file: ${fileName}\n` +
               `✅ Analyzed ${lineCount.toLocaleString()} lines\n` +
-              `🔄 Processing roles: ${processedCount}/${totalMembers} members\n` +
+              `🔄 Processing roles: ${processedCount}/${uniqueMessageUserCount} members\n` +
               `   (${cachedCount} from cache, fetching remaining...)`
             ).catch(() => {});
           }
@@ -215,8 +265,22 @@ async function processNDJSON(message) {
         for (const [id, member] of members) {
           if (membersToCheck.has(id)) {
             userRoles.set(id, member.roles.highest.name || "No Role");
+            userDisplayNames.set(id, member.displayName || member.user.username);
+            
+            // Get join date and calculate days on server
+            const joinDate = member.joinedAt;
+            if (joinDate) {
+              const formattedJoinDate = formatDate(joinDate);
+              userJoinDates.set(id, formattedJoinDate);
+              userTotalDays.set(id, daysBetween(currentDate, joinDate));
+            } else {
+              userJoinDates.set(id, "Unknown");
+              userTotalDays.set(id, "Unknown");
+            }
+            
             membersToCheck.delete(id);
             processedCount++;
+            currentServerUsers.add(id); // Mark user as currently on server
           }
         }
         
@@ -226,7 +290,7 @@ async function processNDJSON(message) {
           `🔄 Processing file: ${fileName}\n` +
           `✅ Analyzed ${lineCount.toLocaleString()} lines\n` +
           `🔄 Fetching member data: ${memberCount} members fetched\n` +
-          `🔄 Processing roles: ${processedCount}/${totalMembers} members identified`
+          `🔄 Processing roles: ${processedCount}/${uniqueMessageUserCount} members identified`
         );
         
         // Continue fetching if there are more members
@@ -242,8 +306,22 @@ async function processNDJSON(message) {
             for (const [id, member] of members) {
               if (membersToCheck.has(id)) {
                 userRoles.set(id, member.roles.highest.name || "No Role");
+                userDisplayNames.set(id, member.displayName || member.user.username);
+                
+                // Get join date and calculate days on server
+                const joinDate = member.joinedAt;
+                if (joinDate) {
+                  const formattedJoinDate = formatDate(joinDate);
+                  userJoinDates.set(id, formattedJoinDate);
+                  userTotalDays.set(id, daysBetween(currentDate, joinDate));
+                } else {
+                  userJoinDates.set(id, "Unknown");
+                  userTotalDays.set(id, "Unknown");
+                }
+                
                 membersToCheck.delete(id);
                 processedCount++;
+                currentServerUsers.add(id); // Mark user as currently on server
               }
             }
             
@@ -253,7 +331,7 @@ async function processNDJSON(message) {
               `🔄 Processing file: ${fileName}\n` +
               `✅ Analyzed ${lineCount.toLocaleString()} lines\n` +
               `🔄 Fetching member data: ${memberCount} members fetched\n` +
-              `🔄 Processing roles: ${processedCount}/${totalMembers} members identified`
+              `🔄 Processing roles: ${processedCount}/${uniqueMessageUserCount} members identified`
             );
           } else {
             break; // No more members
@@ -268,7 +346,7 @@ async function processNDJSON(message) {
           `🔄 Processing file: ${fileName}\n` +
           `✅ Analyzed ${lineCount.toLocaleString()} lines\n` +
           `⚠️ Error fetching all members: ${error.message}\n` +
-          `🔄 Continuing with roles for ${processedCount}/${totalMembers} members identified`
+          `🔄 Continuing with roles for ${processedCount}/${uniqueMessageUserCount} members identified`
         );
       }
       
@@ -279,7 +357,7 @@ async function processNDJSON(message) {
           `Data Processing Status\n` +
           `🔄 Processing file: ${fileName}\n` +
           `✅ Analyzed ${lineCount.toLocaleString()} lines\n` +
-          `🔄 Identified ${processedCount}/${totalMembers} members\n` +
+          `🔄 Identified ${processedCount}/${uniqueMessageUserCount} members\n` +
           `🔄 Checking top active remaining members...`
         );
         
@@ -295,8 +373,22 @@ async function processNDJSON(message) {
             const member = await guild.members.fetch(id);
             if (member) {
               userRoles.set(id, member.roles.highest.name || "No Role");
+              userDisplayNames.set(id, member.displayName || member.user.username);
+              
+              // Get join date and calculate days on server
+              const joinDate = member.joinedAt;
+              if (joinDate) {
+                const formattedJoinDate = formatDate(joinDate);
+                userJoinDates.set(id, formattedJoinDate);
+                userTotalDays.set(id, daysBetween(currentDate, joinDate));
+              } else {
+                userJoinDates.set(id, "Unknown");
+                userTotalDays.set(id, "Unknown");
+              }
+              
               membersToCheck.delete(id);
               processedCount++;
+              currentServerUsers.add(id); // Mark user as currently on server
             }
           } catch (error) {
             // User likely not in server anymore - keep as "Not in server"
@@ -306,13 +398,13 @@ async function processNDJSON(message) {
       }
       
       // Calculate the percentage of identified users
-      const identifiedPercentage = Math.round((processedCount / totalMembers) * 100);
+      const identifiedPercentage = Math.round((processedCount / uniqueMessageUserCount) * 100);
       
       await statusMessage.edit(
         `Data Processing Status\n` +
         `🔄 Processing file: ${fileName}\n` +
         `✅ Analyzed ${lineCount.toLocaleString()} lines\n` +
-        `✅ Role data complete: Identified ${processedCount}/${totalMembers} members (${identifiedPercentage}%)\n` +
+        `✅ Role data complete: Identified ${processedCount}/${uniqueMessageUserCount} members (${identifiedPercentage}%)\n` +
         `🔄 Preparing CSV reports...`
       );
     }
@@ -331,10 +423,17 @@ async function processNDJSON(message) {
         dailyData[`count_${date}`] = dailyMsgCountMap.get(date) || 0;
       }
       
+      // Get active days count
+      const activeDaysCount = userActiveDays.has(userId) ? userActiveDays.get(userId).size : 0;
+      
       messageCountRows.push({
         userId,
         username: usernames.get(userId),
+        displayName: userDisplayNames.get(userId) || usernames.get(userId) || "Unknown",
         highestRole: userRoles.get(userId) || "Unknown",
+        joinDate: userJoinDates.get(userId) || "Unknown",
+        totalDaysOnServer: userTotalDays.get(userId) || "N/A",
+        activeDaysCount: activeDaysCount,
         messageCount: totalMsgCount,
         ...dailyData
       });
@@ -347,8 +446,8 @@ async function processNDJSON(message) {
     const symbolCountRows = [];
     for (const [userId, totalSymbols] of userSymbolCounts.entries()) {
       const dailySymbolsMap = userDailySymbols.get(userId);
-      const totalMessages = userMessageCounts.get(userId);
-      const avgSymbolsPerMsg = totalMessages > 0 ? Math.round(totalSymbols / totalMessages) : 0;
+      const totalMsgCount = userMessageCounts.get(userId);
+      const avgSymbolsPerMsg = totalMsgCount > 0 ? Math.round(totalSymbols / totalMsgCount) : 0;
       const dailyData = {};
       
       // Add daily symbol count columns sorted newest to oldest
@@ -356,11 +455,18 @@ async function processNDJSON(message) {
         dailyData[`symbols_${date}`] = dailySymbolsMap.get(date) || 0;
       }
       
+      // Get active days count
+      const activeDaysCount = userActiveDays.has(userId) ? userActiveDays.get(userId).size : 0;
+      
       symbolCountRows.push({
         userId,
         username: usernames.get(userId),
+        displayName: userDisplayNames.get(userId) || usernames.get(userId) || "Unknown",
         highestRole: userRoles.get(userId) || "Unknown",
-        totalMessages,
+        joinDate: userJoinDates.get(userId) || "Unknown",
+        totalDaysOnServer: userTotalDays.get(userId) || "N/A",
+        activeDaysCount: activeDaysCount,
+        totalMessages: totalMsgCount,
         totalSymbols,
         avgSymbolsPerMsg,
         ...dailyData
@@ -380,7 +486,11 @@ async function processNDJSON(message) {
     const messageCountHeaders = [
       { id: 'userId', title: 'User ID' },
       { id: 'username', title: 'Username' },
+      { id: 'displayName', title: 'Display Name' },
       { id: 'highestRole', title: 'Highest Role' },
+      { id: 'joinDate', title: 'Join Date' },
+      { id: 'totalDaysOnServer', title: 'Days on Server' },
+      { id: 'activeDaysCount', title: 'Active Days' },
       { id: 'messageCount', title: 'Total Messages' }
     ];
     
@@ -398,7 +508,11 @@ async function processNDJSON(message) {
     const symbolCountHeaders = [
       { id: 'userId', title: 'User ID' },
       { id: 'username', title: 'Username' },
+      { id: 'displayName', title: 'Display Name' },
       { id: 'highestRole', title: 'Highest Role' },
+      { id: 'joinDate', title: 'Join Date' },
+      { id: 'totalDaysOnServer', title: 'Days on Server' },
+      { id: 'activeDaysCount', title: 'Active Days' },
       { id: 'totalMessages', title: 'Total Messages' },
       { id: 'totalSymbols', title: 'Total Symbols' },
       { id: 'avgSymbolsPerMsg', title: 'Avg Symbols/Message' }
@@ -424,13 +538,59 @@ async function processNDJSON(message) {
       roleStatus = "⚠️ Role data not fetched (--noroles flag used)";
     } else {
       // Calculate percentage if we have values
-      if (totalMembers > 0) {
-        const identifiedPercentage = Math.round((processedCount / totalMembers) * 100);
-        roleStatus = `✅ Role data included (${processedCount}/${totalMembers} members identified, ${identifiedPercentage}%)`;
+      if (uniqueMessageUserCount > 0) {
+        const identifiedPercentage = Math.round((processedCount / uniqueMessageUserCount) * 100);
+        roleStatus = `✅ Role data included (${processedCount}/${uniqueMessageUserCount} members identified, ${identifiedPercentage}%)`;
       } else {
         roleStatus = "✅ Role data included";
       }
     }
+    
+    // Get total server members from the guild
+    const totalServerMembers = guild.memberCount;
+    
+    // Calculate the requested statistics    
+    // Total users who sent at least X messages
+    const usersWithAtLeast1Msg = userMessageCounts.size;
+    const usersWithAtLeast2Msg = Array.from(userMessageCounts.values()).filter(count => count >= 2).length;
+    const usersWithAtLeast3Msg = Array.from(userMessageCounts.values()).filter(count => count >= 3).length;
+    
+    // Users currently on server who sent at least X messages
+    const currentUsersWithAtLeast1Msg = Array.from(currentServerUsers).filter(id => 
+      userMessageCounts.has(id) && userMessageCounts.get(id) >= 1
+    ).length;
+    
+    const currentUsersWithAtLeast2Msg = Array.from(currentServerUsers).filter(id => 
+      userMessageCounts.has(id) && userMessageCounts.get(id) >= 2
+    ).length;
+    
+    const currentUsersWithAtLeast3Msg = Array.from(currentServerUsers).filter(id => 
+      userMessageCounts.has(id) && userMessageCounts.get(id) >= 3
+    ).length;
+    
+    // Calculate percentages based on total server members
+    const percentUsersWithAtLeast1Msg = (usersWithAtLeast1Msg / totalServerMembers * 100).toFixed(2);
+    const percentUsersWithAtLeast2Msg = (usersWithAtLeast2Msg / totalServerMembers * 100).toFixed(2);
+    const percentUsersWithAtLeast3Msg = (usersWithAtLeast3Msg / totalServerMembers * 100).toFixed(2);
+    
+    // Calculate percentages of current server users
+    const percentCurrentUsersWithAtLeast1Msg = (currentUsersWithAtLeast1Msg / totalServerMembers * 100).toFixed(2);
+    const percentCurrentUsersWithAtLeast2Msg = (currentUsersWithAtLeast2Msg / totalServerMembers * 100).toFixed(2);
+    const percentCurrentUsersWithAtLeast3Msg = (currentUsersWithAtLeast3Msg / totalServerMembers * 100).toFixed(2);
+    
+    // Calculate average symbols per message
+    const avgSymbolsPerMessage = totalMessages > 0 ? (totalSymbols / totalMessages).toFixed(2) : 0;
+    
+    // Create statistics section
+    const statisticsSection = 
+      `📊 Message Statistics:\n` +
+      `• ${percentUsersWithAtLeast1Msg}% of total server users have at least 1 message (${usersWithAtLeast1Msg}/${totalServerMembers})\n` +
+      `• ${percentCurrentUsersWithAtLeast1Msg}% of current server users have at least 1 message (${currentUsersWithAtLeast1Msg}/${totalServerMembers})\n` +
+      `• ${percentUsersWithAtLeast2Msg}% of total server users have at least 2 messages (${usersWithAtLeast2Msg}/${totalServerMembers})\n` +
+      `• ${percentCurrentUsersWithAtLeast2Msg}% of current server users have at least 2 messages (${currentUsersWithAtLeast2Msg}/${totalServerMembers})\n` +
+      `• ${percentUsersWithAtLeast3Msg}% of total server users have at least 3 messages (${usersWithAtLeast3Msg}/${totalServerMembers})\n` +
+      `• ${percentCurrentUsersWithAtLeast3Msg}% of current server users have at least 3 messages (${currentUsersWithAtLeast3Msg}/${totalServerMembers})\n` +
+      `• Average symbols per message: ${avgSymbolsPerMessage}`;
 
     // Update status with completion message
     await statusMessage.edit(
@@ -440,7 +600,8 @@ async function processNDJSON(message) {
       `1. ${messageCountsFile} - Users sorted by message count with daily breakdown\n` +
       `2. ${symbolCountsFile} - Users sorted by symbol count with avg symbols and daily breakdown\n` +
       `${roleStatus}\n` +
-      `📊 Processed data from ${userMessageCounts.size} users with ${lineCount.toLocaleString()} total lines`
+      `📊 Processed data from ${userMessageCounts.size} users with ${lineCount.toLocaleString()} total lines\n\n` +
+      `${statisticsSection}`
     );
 
     console.log(`Processing complete: Generated ${messageCountsFile} and ${symbolCountsFile}`);
