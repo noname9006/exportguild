@@ -1,31 +1,10 @@
-require('dotenv').config();
+// exportguild.js - Contains guild data export functionality
 const fs = require('fs');
 const path = require('path');
 const { 
-  Client, 
-  GatewayIntentBits, 
-  Partials, 
   PermissionFlagsBits,
   ChannelType
 } = require('discord.js');
-
-// Set up the Discord client with necessary intents to read messages
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ],
-  partials: [
-    Partials.Channel,
-    Partials.Message,
-    Partials.ThreadMember
-  ]
-});
-
-// Track active exports to prevent multiple exports in the same guild
-const activeExports = new Set();
 
 // Parse excluded channels from environment variable
 const excludedChannels = process.env.EX_CHANNELS ? 
@@ -33,7 +12,7 @@ const excludedChannels = process.env.EX_CHANNELS ?
   new Set();
 
 // Export threshold - how many messages to process before auto-save
-const EXPORT_THRESHOLD = parseInt(process.env.METADATA_EXPORT_THRESHOLD) || 5000; // Reduced from 10000
+const EXPORT_THRESHOLD = parseInt(process.env.METADATA_EXPORT_THRESHOLD) || 5000;
 
 // Memory limit in MB - default to 500MB if not specified
 const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB) || 500;
@@ -49,40 +28,7 @@ const MEMORY_CHECK_INTERVAL = parseInt(process.env.MEMORY_CHECK_INTERVAL) || 100
 const AUTO_SAVE_INTERVAL = parseInt(process.env.AUTO_SAVE_INTERVAL) || 30000;
 
 // Maximum concurrent API requests
-const MAX_CONCURRENT_REQUESTS = 3; // Reduced from 5
-
-client.once('ready', () => {
-  console.log(`Bot is ready! Logged in as ${client.user.tag}`);
-  console.log(`Memory limit set to: ${MEMORY_LIMIT_MB} MB (effective limit: ${Math.round(MEMORY_LIMIT_MB * MEMORY_SCALE_FACTOR)} MB)`);
-});
-
-client.on('messageCreate', async (message) => {
-  // Check if the message is the export command
-  if (message.content.toLowerCase() === '!exportguild') {
-    // Verify the user has administrator permissions
-    if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-      return message.reply('You need administrator permissions to use this command.');
-    }
-
-    // Check if an export is already running for this guild
-    if (activeExports.has(message.guildId)) {
-      return message.reply('An export is already running for this guild!');
-    }
-
-    // Set guild as being exported
-    activeExports.add(message.guildId);
-
-    try {
-      await handleExportGuild(message);
-    } catch (error) {
-      console.error('Critical error during export:', error);
-      message.channel.send(`Critical error during export: ${error.message}`);
-    } finally {
-      // Remove guild from active exports when done (even if there was an error)
-      activeExports.delete(message.guildId);
-    }
-  }
-});
+const MAX_CONCURRENT_REQUESTS = 3;
 
 // Function to check current memory usage and return details
 function checkMemoryUsage() {
@@ -133,7 +79,6 @@ async function forceMemoryRelease() {
   if (process.versions.node.split('.')[0] >= 12) {
     try {
       console.log('Attempting to compact heap memory...');
-      // TypeScript might not know this method
       if (typeof v8 !== 'undefined' && v8.getHeapStatistics && v8.writeHeapSnapshot) {
         const v8 = require('v8');
         const heapBefore = v8.getHeapStatistics().total_heap_size;
@@ -186,150 +131,6 @@ async function performMemoryCleanup(exportState) {
     console.error('Error during memory cleanup:', error);
   } finally {
     exportState.saveInProgress = false;
-  }
-}
-
-async function handleExportGuild(message) {
-  const guild = message.guild;
-  
-  console.log(`Starting export for guild: ${guild.name} (${guild.id})`);
-  logMemoryUsage('Initial');
-  
-  // Create status message
-  const statusMessage = await message.channel.send(
-    `Guild Export Status (#1)\n` +
-    `🔄 Initializing NDJSON export...`
-  );
-
-  // Create a unique filename for this export
-  const timestamp = new Date().toISOString();
-  const sanitizedGuildName = guild.name.replace(/[^a-z0-9]/gi, '-').toLowerCase();
-  const filename = `${sanitizedGuildName}-${guild.id}-${timestamp.replace(/[:.]/g, '-')}.ndjson`;
-  const filepath = path.join(process.cwd(), filename);
-  
-  console.log(`Export file will be created at: ${filepath}`);
-  
-  // Initialize export state
-  const exportState = {
-    startTime: Date.now(),
-    processedMessages: 0,
-    messagesTotalProcessed: 0,
-    messagesWrittenToFile: 0,
-    messageDroppedCount: 0,
-    messageWriteErrors: 0,
-    totalChannels: 0,
-    processedChannels: 0,
-    currentChannelIndex: 0,
-    currentChannel: null,
-    messagesInCurrentChannel: 0,
-    rateLimitHits: 0,
-    lastStatusUpdateTime: Date.now(),
-    lastAutoSaveTime: Date.now(),
-    memoryCheckCount: 0,
-    memoryTriggeredSaves: 0,
-    runningTasksCount: 0,
-    filename: filename,
-    filepath: filepath,
-    saveInProgress: false,
-    memoryLimit: MEMORY_LIMIT_BYTES
-  };
-
-  // Create the file with a header metadata record
-  const initialMetadata = {
-    type: 'metadata',
-    id: guild.id,
-    name: guild.name,
-    exportStartedAt: timestamp,
-    exportFormat: 'ndjson',
-    botVersion: '1.0.0-ndjson'
-  };
-  
-  // Write initial metadata as the first line
-  fs.writeFileSync(filepath, JSON.stringify(initialMetadata) + '\n');
-  console.log(`Created initial export file: ${filename}`);
-  
-  // Update the status message initially
-  await updateStatusMessage(statusMessage, exportState, guild);
-  
-  // Set up memory check timer
-  const memoryCheckTimer = setInterval(() => {
-    checkAndHandleMemoryUsage(exportState, 'TIMER_CHECK');
-  }, MEMORY_CHECK_INTERVAL);
-  
-  try {
-    // Get all channels in the guild that are actually visible
-    const allChannels = await fetchVisibleChannels(guild);
-    exportState.totalChannels = allChannels.length;
-    
-    console.log(`Found ${allChannels.length} visible channels to process`);
-    
-    // Write channel metadata to the file
-    for (const channelObj of allChannels) {
-      const channel = channelObj.channel;
-      const channelMetadata = {
-        type: 'channel',
-        id: channel.id,
-        name: channel.name,
-        channelType: channel.type,
-        isThread: channelObj.isThread,
-        parentId: channelObj.parentId,
-        parentName: channelObj.parentName
-      };
-      
-      // Write channel metadata as a separate NDJSON line
-      fs.appendFileSync(filepath, JSON.stringify(channelMetadata) + '\n');
-    }
-    
-    // Process channels in parallel with controlled concurrency
-    await processChannelsInParallel(allChannels, exportState, statusMessage, guild);
-    
-    // Verify export completeness
-    const lineCount = await verifyExportCompleteness(exportState);
-    console.log(`Export verification complete. File contains ${lineCount} lines.`);
-    
-    // Write the final status update metadata
-    const finalMetadata = {
-      type: 'metadata',
-      id: guild.id,
-      name: guild.name,
-      exportCompletedAt: new Date().toISOString(),
-      totalMessagesProcessed: exportState.messagesTotalProcessed,
-      totalNonBotMessages: exportState.processedMessages,
-      messagesWrittenToFile: exportState.messagesWrittenToFile,
-      botMessagesFiltered: exportState.messageDroppedCount,
-      writeErrors: exportState.messageWriteErrors,
-      fileLineCount: lineCount,
-      exportDurationSeconds: Math.floor((Date.now() - exportState.startTime) / 1000),
-      channelsProcessed: exportState.totalChannels,
-      rateLimitHits: exportState.rateLimitHits
-    };
-    fs.appendFileSync(filepath, JSON.stringify(finalMetadata) + '\n');
-    
-    // Final status update
-    await updateStatusMessage(statusMessage, exportState, guild, true);
-    
-    console.log(`Export completed successfully for guild: ${guild.name} (${guild.id})`);
-    logMemoryUsage('Final');
-  } catch (error) {
-    console.error('Error during export:', error);
-    
-    try {
-      // Add error metadata to the file
-      const errorMetadata = {
-        type: 'error',
-        timestamp: new Date().toISOString(),
-        error: error.message,
-        stage: 'export-process'
-      };
-      fs.appendFileSync(filepath, JSON.stringify(errorMetadata) + '\n');
-    } catch (e) {
-      console.error('Error saving error metadata:', e);
-    }
-    
-    await statusMessage.edit(`Error occurred during export: ${error.message}`);
-  } finally {
-    // Clear timer
-    clearInterval(memoryCheckTimer);
   }
 }
 
@@ -733,9 +534,156 @@ async function updateStatusMessage(statusMessage, exportState, guild, isFinal = 
   }
 }
 
-// Login to Discord
-console.log(`Starting bot with memory limit: ${MEMORY_LIMIT_MB}MB (effective: ${Math.round(MEMORY_LIMIT_MB * MEMORY_SCALE_FACTOR)}MB)`);
-client.login(process.env.DISCORD_TOKEN).catch(error => {
-  console.error('Failed to login:', error);
-  process.exit(1);
-});
+async function handleExportGuild(message, client) {
+  const guild = message.guild;
+  
+  console.log(`Starting export for guild: ${guild.name} (${guild.id})`);
+  logMemoryUsage('Initial');
+  
+  // Verify the user has administrator permissions
+  if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+    return message.reply('You need administrator permissions to use this command.');
+  }
+  
+  // Create status message
+  const statusMessage = await message.channel.send(
+    `Guild Export Status (#1)\n` +
+    `🔄 Initializing NDJSON export...`
+  );
+
+  // Create a unique filename for this export
+  const timestamp = new Date().toISOString();
+  const sanitizedGuildName = guild.name.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+  const filename = `${sanitizedGuildName}-${guild.id}-${timestamp.replace(/[:.]/g, '-')}.ndjson`;
+  const filepath = path.join(process.cwd(), filename);
+  
+  console.log(`Export file will be created at: ${filepath}`);
+  
+  // Initialize export state
+  const exportState = {
+    startTime: Date.now(),
+    processedMessages: 0,
+    messagesTotalProcessed: 0,
+    messagesWrittenToFile: 0,
+    messageDroppedCount: 0,
+    messageWriteErrors: 0,
+    totalChannels: 0,
+    processedChannels: 0,
+    currentChannelIndex: 0,
+    currentChannel: null,
+    messagesInCurrentChannel: 0,
+    rateLimitHits: 0,
+    lastStatusUpdateTime: Date.now(),
+    lastAutoSaveTime: Date.now(),
+    memoryCheckCount: 0,
+    memoryTriggeredSaves: 0,
+    runningTasksCount: 0,
+    filename: filename,
+    filepath: filepath,
+    saveInProgress: false,
+    memoryLimit: MEMORY_LIMIT_BYTES
+  };
+
+  // Create the file with a header metadata record
+  const initialMetadata = {
+    type: 'metadata',
+    id: guild.id,
+    name: guild.name,
+    exportStartedAt: timestamp,
+    exportFormat: 'ndjson',
+    botVersion: '1.0.0-ndjson'
+  };
+  
+  // Write initial metadata as the first line
+  fs.writeFileSync(filepath, JSON.stringify(initialMetadata) + '\n');
+  console.log(`Created initial export file: ${filename}`);
+  
+  // Update the status message initially
+  await updateStatusMessage(statusMessage, exportState, guild);
+  
+  // Set up memory check timer
+  const memoryCheckTimer = setInterval(() => {
+    checkAndHandleMemoryUsage(exportState, 'TIMER_CHECK');
+  }, MEMORY_CHECK_INTERVAL);
+  
+  try {
+    // Get all channels in the guild that are actually visible
+    const allChannels = await fetchVisibleChannels(guild);
+    exportState.totalChannels = allChannels.length;
+    
+    console.log(`Found ${allChannels.length} visible channels to process`);
+    
+    // Write channel metadata to the file
+    for (const channelObj of allChannels) {
+      const channel = channelObj.channel;
+      const channelMetadata = {
+        type: 'channel',
+        id: channel.id,
+        name: channel.name,
+        channelType: channel.type,
+        isThread: channelObj.isThread,
+        parentId: channelObj.parentId,
+        parentName: channelObj.parentName
+      };
+      
+      // Write channel metadata as a separate NDJSON line
+      fs.appendFileSync(filepath, JSON.stringify(channelMetadata) + '\n');
+    }
+    
+    // Process channels in parallel with controlled concurrency
+    await processChannelsInParallel(allChannels, exportState, statusMessage, guild);
+    
+    // Verify export completeness
+    const lineCount = await verifyExportCompleteness(exportState);
+    console.log(`Export verification complete. File contains ${lineCount} lines.`);
+    
+    // Write the final status update metadata
+    const finalMetadata = {
+      type: 'metadata',
+      id: guild.id,
+      name: guild.name,
+      exportCompletedAt: new Date().toISOString(),
+      totalMessagesProcessed: exportState.messagesTotalProcessed,
+      totalNonBotMessages: exportState.processedMessages,
+      messagesWrittenToFile: exportState.messagesWrittenToFile,
+      botMessagesFiltered: exportState.messageDroppedCount,
+      writeErrors: exportState.messageWriteErrors,
+      fileLineCount: lineCount,
+      exportDurationSeconds: Math.floor((Date.now() - exportState.startTime) / 1000),
+      channelsProcessed: exportState.totalChannels,
+      rateLimitHits: exportState.rateLimitHits
+    };
+    fs.appendFileSync(filepath, JSON.stringify(finalMetadata) + '\n');
+    
+    // Final status update
+    await updateStatusMessage(statusMessage, exportState, guild, true);
+    
+    console.log(`Export completed successfully for guild: ${guild.name} (${guild.id})`);
+    logMemoryUsage('Final');
+  } catch (error) {
+    console.error('Error during export:', error);
+    
+    try {
+      // Add error metadata to the file
+      const errorMetadata = {
+        type: 'error',
+        timestamp: new Date().toISOString(),
+        error: error.message,
+        stage: 'export-process'
+      };
+      fs.appendFileSync(filepath, JSON.stringify(errorMetadata) + '\n');
+    } catch (e) {
+      console.error('Error saving error metadata:', e);
+    }
+    
+    await statusMessage.edit(`Error occurred during export: ${error.message}`);
+  } finally {
+    // Clear timer
+    clearInterval(memoryCheckTimer);
+  }
+}
+
+// Export functions
+module.exports = {
+  handleExportGuild
+};
