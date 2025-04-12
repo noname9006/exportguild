@@ -1,31 +1,30 @@
-// exportguild.js - Contains guild data export functionality
 const fs = require('fs');
 const path = require('path');
 const { 
   PermissionFlagsBits,
   ChannelType
 } = require('discord.js');
+const config = require('./config');
 
-// Parse excluded channels from environment variable
-const excludedChannels = process.env.EX_CHANNELS ? 
-  new Set(process.env.EX_CHANNELS.split(',').map(id => id.trim())) : 
-  new Set();
+// Parse excluded channels from environment variable or config
+const excludedChannelsArray = config.getConfig('excludedChannels', 'EX_CHANNELS');
+const excludedChannels = new Set(excludedChannelsArray);
 
 // Export threshold - how many messages to process before auto-save
-const EXPORT_THRESHOLD = parseInt(process.env.METADATA_EXPORT_THRESHOLD) || 5000;
+const EXPORT_THRESHOLD = config.getConfig('exportThreshold', 'METADATA_EXPORT_THRESHOLD');
 
-// Memory limit in MB - default to 500MB if not specified
-const MEMORY_LIMIT_MB = parseInt(process.env.MEMORY_LIMIT_MB) || 500;
+// Memory limit in MB
+const MEMORY_LIMIT_MB = config.getConfig('memoryLimitMB', 'MEMORY_LIMIT_MB');
 // Convert to bytes for easier comparison with process.memoryUsage()
 const MEMORY_LIMIT_BYTES = MEMORY_LIMIT_MB * 1024 * 1024;
 // Memory scale factor - use only this percentage of the configured limit as effective limit
 const MEMORY_SCALE_FACTOR = 0.85;
 
 // Memory check frequency in milliseconds
-const MEMORY_CHECK_INTERVAL = parseInt(process.env.MEMORY_CHECK_INTERVAL) || 10000;
+const MEMORY_CHECK_INTERVAL = config.getConfig('memoryCheckInterval', 'MEMORY_CHECK_INTERVAL');
 
-// Auto-save interval in milliseconds (save every 30 seconds)
-const AUTO_SAVE_INTERVAL = parseInt(process.env.AUTO_SAVE_INTERVAL) || 30000;
+// Auto-save interval in milliseconds
+const AUTO_SAVE_INTERVAL = config.getConfig('autoSaveInterval', 'AUTO_SAVE_INTERVAL');
 
 // Maximum concurrent API requests
 const MAX_CONCURRENT_REQUESTS = 3;

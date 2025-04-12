@@ -5,12 +5,14 @@ const path = require('path');
 const { 
   Client, 
   GatewayIntentBits, 
-  Partials
+  Partials,
+  EmbedBuilder
 } = require('discord.js');
 
 // Import modules
 const exportGuild = require('./exportguild');
 const processData = require('./processData');
+const config = require('./config');
 
 // Set up the Discord client with necessary intents to read messages
 const client = new Client({
@@ -34,6 +36,187 @@ client.once('ready', () => {
 // Track active operations to prevent multiple operations in the same guild
 const activeOperations = new Set();
 
+// Function to handle excluded channels commands
+async function handleExcludedChannelsCommands(message, args) {
+  // Check if user has administrator permissions
+  if (!message.member.permissions.has('ADMINISTRATOR')) {
+    return message.reply('You need administrator permissions to manage excluded channels.');
+  }
+
+  const subCommand = args[1]?.toLowerCase();
+
+  // !ex list command
+  if (!subCommand || subCommand === 'list') {
+    const embed = new EmbedBuilder()
+      .setTitle('Excluded Channels')
+      .setDescription('These channels are excluded from the export process:')
+      .setColor('#0099ff')
+      .setTimestamp()
+      .setFooter({ 
+        text: `Requested by ${message.author.username}`,
+        iconURL: message.author.displayAvatarURL() 
+      });
+
+    if (config.excludedChannels.length === 0) {
+      embed.addFields({ name: 'No channels excluded', value: 'All channels will be exported.' });
+    } else {
+      // Create a field for each excluded channel
+      let channelList = '';
+      
+      for (const channelId of config.excludedChannels) {
+        // Try to fetch the channel to get its name
+        try {
+          const channel = await message.guild.channels.fetch(channelId);
+          if (channel) {
+            channelList += `• <#${channelId}> (${channel.name})\n`;
+          } else {
+            channelList += `• Channel ID: ${channelId} (not found in server)\n`;
+          }
+        } catch (error) {
+          // Channel might not exist anymore
+          channelList += `• Channel ID: ${channelId} (not accessible)\n`;
+        }
+      }
+      
+      embed.addFields({ name: `${config.excludedChannels.length} Excluded Channels`, value: channelList || 'Error retrieving channels' });
+    }
+
+    return message.channel.send({ embeds: [embed] });
+  }
+  
+  // !ex add command
+  else if (subCommand === 'add') {
+    if (args.length < 3) {
+      return message.reply('Please provide a channel ID, URL, or mention to add it to the exclusion list.');
+    }
+
+    // Get all arguments after "add" as potential channel references
+    const channelReferences = args.slice(2);
+    const addedChannels = [];
+    const failedChannels = [];
+
+    for (const channelRef of channelReferences) {
+      // Try to resolve the channel reference
+      let channelId = channelRef.trim();
+      
+      // Handle channel mentions
+      if (channelRef.startsWith('<#') && channelRef.endsWith('>')) {
+        channelId = channelRef.substring(2, channelRef.length - 1);
+      }
+      // Handle URLs
+      else if (channelRef.includes('/channels/')) {
+        const parts = channelRef.split('/');
+        channelId = parts[parts.length - 1];
+      }
+
+      // Try to fetch the channel to validate it exists
+      try {
+        const channel = await message.guild.channels.fetch(channelId);
+        if (channel) {
+          // Valid channel, add to exclusion list
+          if (config.addExcludedChannel(channelId)) {
+            addedChannels.push(`<#${channelId}> (${channel.name})`);
+          } else {
+            failedChannels.push(`<#${channelId}> - already in the exclusion list`);
+          }
+        } else {
+          failedChannels.push(`${channelRef} - channel not found`);
+        }
+      } catch (error) {
+        // Could not fetch channel or invalid ID
+        failedChannels.push(`${channelRef} - ${error.message}`);
+      }
+    }
+
+    // Create response message
+    let response = '';
+    if (addedChannels.length > 0) {
+      response += `✅ Added ${addedChannels.length} channel(s) to the exclusion list:\n`;
+      response += addedChannels.map(ch => `• ${ch}`).join('\n');
+    }
+    if (failedChannels.length > 0) {
+      if (response) response += '\n\n';
+      response += `❌ Failed to add ${failedChannels.length} channel(s):\n`;
+      response += failedChannels.map(ch => `• ${ch}`).join('\n');
+    }
+
+    return message.channel.send(response || 'No channels were processed.');
+  }
+  
+  // !ex remove command
+  else if (subCommand === 'remove') {
+    if (args.length < 3) {
+      return message.reply('Please provide a channel ID, URL, or mention to remove it from the exclusion list.');
+    }
+
+    // Get all arguments after "remove" as potential channel references
+    const channelReferences = args.slice(2);
+    const removedChannels = [];
+    const failedChannels = [];
+
+    for (const channelRef of channelReferences) {
+      // Try to resolve the channel reference
+      let channelId = channelRef.trim();
+      
+      // Handle channel mentions
+      if (channelRef.startsWith('<#') && channelRef.endsWith('>')) {
+        channelId = channelRef.substring(2, channelRef.length - 1);
+      }
+      // Handle URLs
+      else if (channelRef.includes('/channels/')) {
+        const parts = channelRef.split('/');
+        channelId = parts[parts.length - 1];
+      }
+
+      // Try to fetch the channel to validate it (if possible)
+      try {
+        const channel = await message.guild.channels.fetch(channelId);
+        if (channel) {
+          // Valid channel, remove from exclusion list
+          if (config.removeExcludedChannel(channelId)) {
+            removedChannels.push(`<#${channelId}> (${channel.name})`);
+          } else {
+            failedChannels.push(`<#${channelId}> - not in the exclusion list`);
+          }
+        } else {
+          // Channel not found in the server but try to remove it anyway
+          if (config.removeExcludedChannel(channelId)) {
+            removedChannels.push(`Channel ID: ${channelId} (not found in server)`);
+          } else {
+            failedChannels.push(`${channelRef} - not in the exclusion list`);
+          }
+        }
+      } catch (error) {
+        // Could not fetch channel, but still try to remove by ID
+        if (config.removeExcludedChannel(channelId)) {
+          removedChannels.push(`Channel ID: ${channelId} (not accessible)`);
+        } else {
+          failedChannels.push(`${channelRef} - ${error.message}`);
+        }
+      }
+    }
+
+    // Create response message
+    let response = '';
+    if (removedChannels.length > 0) {
+      response += `✅ Removed ${removedChannels.length} channel(s) from the exclusion list:\n`;
+      response += removedChannels.map(ch => `• ${ch}`).join('\n');
+    }
+    if (failedChannels.length > 0) {
+      if (response) response += '\n\n';
+      response += `❌ Failed to remove ${failedChannels.length} channel(s):\n`;
+      response += failedChannels.map(ch => `• ${ch}`).join('\n');
+    }
+
+    return message.channel.send(response || 'No channels were processed.');
+  }
+  
+  // Unknown subcommand
+  else {
+    return message.reply('Unknown subcommand. Available commands: `!ex list`, `!ex add <channel>`, `!ex remove <channel>`');
+  }
+}
+
 // Command handler
 client.on('messageCreate', async (message) => {
   // Ignore messages from bots
@@ -41,9 +224,15 @@ client.on('messageCreate', async (message) => {
 
   const args = message.content.trim().split(/\s+/);
   const command = args[0].toLowerCase();
-  const subCommand = args[1]?.toLowerCase();
 
-  if (command === '!exportguild') {
+  // Handle excluded channels commands
+  if (command === '!ex') {
+    await handleExcludedChannelsCommands(message, args);
+    return;
+  }
+  
+  // Existing commands for exportguild
+  else if (command === '!exportguild') {
     // Check if an operation is already running for this guild
     if (activeOperations.has(message.guildId)) {
       return message.reply('An operation is already running for this guild!');
@@ -53,6 +242,8 @@ client.on('messageCreate', async (message) => {
     activeOperations.add(message.guildId);
 
     try {
+      const subCommand = args[1]?.toLowerCase();
+      
       if (!subCommand || subCommand === 'export') {
         // Export guild data
         await exportGuild.handleExportGuild(message, client);
