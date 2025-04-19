@@ -317,10 +317,9 @@ async function generateChannelList(guild) {
   const statsContent = `\n## 📊 Statistics\n` +
     `- Categories: ${categoryCount}\n` +
     `- Text Channels: ${textChannelCount}\n` +
-    `- Forum Channels: ${forumChannelCount}\n` +
     `- Threads: ${threadCount}\n` +
+	`- Forum Channels: ${forumChannelCount}\n` +
     `- Forum Posts: ${forumPostCount}\n` +
-    `- Total: ${textChannelCount + forumChannelCount + threadCount + forumPostCount + categoryCount} channels\n`;
   
   checkAndAppendSegment(statsContent);
   

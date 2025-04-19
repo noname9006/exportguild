@@ -6,13 +6,15 @@ const {
   Client, 
   GatewayIntentBits, 
   Partials,
-  EmbedBuilder
+  EmbedBuilder,
+  PermissionFlagsBits
 } = require('discord.js');
 
 // Import modules
 const exportGuild = require('./exportguild');
 const processData = require('./processData');
 const config = require('./config');
+const channelList = require('./channelList'); // Import the channelList module
 
 // Set up the Discord client with necessary intents to read messages
 const client = new Client({
@@ -39,7 +41,7 @@ const activeOperations = new Set();
 // Function to handle excluded channels commands
 async function handleExcludedChannelsCommands(message, args) {
   // Check if user has administrator permissions
-  if (!message.member.permissions.has('ADMINISTRATOR')) {
+  if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
     return message.reply('You need administrator permissions to manage excluded channels.');
   }
 
@@ -217,6 +219,12 @@ async function handleExcludedChannelsCommands(message, args) {
   }
 }
 
+// Helper function for formatted current date and time (UTC)
+function getFormattedDateTime() {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:${String(now.getUTCSeconds()).padStart(2, '0')}`;
+}
+
 // Command handler
 client.on('messageCreate', async (message) => {
   // Ignore messages from bots
@@ -228,6 +236,42 @@ client.on('messageCreate', async (message) => {
   // Handle excluded channels commands
   if (command === '!ex') {
     await handleExcludedChannelsCommands(message, args);
+    return;
+  }
+  
+  // Handle channellist command
+  else if (command === '!channellist') {
+    // Check if user has administrator permissions
+    if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return message.reply('You need administrator permissions to use the channel list command.');
+    }
+    
+    // Check if an operation is already running for this guild
+    if (activeOperations.has(message.guildId)) {
+      return message.reply('An operation is already running for this guild!');
+    }
+    
+    // Set guild as being processed
+    activeOperations.add(message.guildId);
+    
+    // Log the command execution with timestamp and user info
+    const timestamp = getFormattedDateTime();
+    console.log(`[${timestamp}] Command: !channellist executed by ${message.author.tag} (${message.author.id}) in guild ${message.guild.name} (${message.guild.id})`);
+    
+    try {
+      // Call the handleChannelListCommand from the channelList module
+      await channelList.handleChannelListCommand(message);
+      
+      // Log successful completion
+      console.log(`[${getFormattedDateTime()}] Completed: !channellist for ${message.guild.name} (${message.guild.id})`);
+    } catch (error) {
+      console.error(`[${getFormattedDateTime()}] Error: !channellist command failed:`, error);
+      message.channel.send(`Error generating channel list: ${error.message}`);
+    } finally {
+      // Remove guild from active operations when done (even if there was an error)
+      activeOperations.delete(message.guildId);
+    }
+    
     return;
   }
   
