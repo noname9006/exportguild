@@ -1,0 +1,21 @@
+{
+  "name": "exportguild",
+  "version": "1.0.0",
+  "description": "Discord bot for exporting guild data",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "csv-writer": "^1.6.0",
+    "discord.js": "^14.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "export"
+  ],
+  "author": "",
+  "license": "ISC"
+}
